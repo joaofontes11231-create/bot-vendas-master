@@ -99,7 +99,7 @@ client.on('guildCreate', async (guild) => {
 const commands = [
   new SlashCommandBuilder()
     .setName('master')
-    .setDescription('[MASTER] Gerenciar aluguéis, bloqueios e painel geral')
+    .setDescription('[MASTER] Gerenciar clientes, lojas, bloqueios e painel geral')
     .addSubcommand(s =>
       s.setName('ativar')
         .setDescription('Ativa ou renova uma loja e notifica dono e servidor')
@@ -107,6 +107,20 @@ const commands = [
         .addStringOption(o => o.setName('id_dono').setDescription('ID da Conta do Dono').setRequired(true))
         .addStringOption(o => o.setName('nome_loja').setDescription('Nome da Loja').setRequired(true))
         .addIntegerOption(o => o.setName('dias').setDescription('Dias de aluguel').setRequired(true))
+    )
+    .addSubcommand(s =>
+      s.setName('clientes')
+        .setDescription('Painel com TODOS os clientes cadastrados e suas lojas')
+    )
+    .addSubcommand(s =>
+      s.setName('remover_cliente')
+        .setDescription('Remove um cliente e TODAS as lojas/produtos dele da lista')
+        .addStringOption(o => o.setName('id_dono').setDescription('ID do Dono (Cliente)').setRequired(true))
+    )
+    .addSubcommand(s =>
+      s.setName('remover_loja')
+        .setDescription('Remove apenas uma loja específica pelo ID do servidor')
+        .addStringOption(o => o.setName('id_servidor').setDescription('ID do Servidor').setRequired(true))
     )
     .addSubcommand(s =>
       s.setName('bloquear')
@@ -125,7 +139,7 @@ const commands = [
     )
     .addSubcommand(s =>
       s.setName('painel')
-        .setDescription('Painel completo do Master com resumo das lojas')
+        .setDescription('Painel completo do Master com resumo geral')
     ),
 
   new SlashCommandBuilder()
@@ -273,6 +287,59 @@ client.on('interactionCreate', async (interaction) => {
           .setColor('#f1c40f');
 
         return interaction.reply({ embeds: [embed], ephemeral: true });
+      }
+
+      if (sub === 'clientes') {
+        const all = await db.getAllLicenses();
+        if (!all.length) {
+          return interaction.reply({ content: '📭 Nenhum cliente cadastrado ainda.', ephemeral: true });
+        }
+
+        const grouped = new Map();
+        for (const lic of all) {
+          if (!grouped.has(lic.owner_id)) grouped.set(lic.owner_id, []);
+          grouped.get(lic.owner_id).push(lic);
+        }
+
+        const blocks = [];
+        for (const [ownerId, stores] of grouped.entries()) {
+          const storeLines = stores
+            .map(s => `   ↳ **${s.store_name}** (\`${s.guild_id}\`) — ${s.isOperational ? '🟢 Ativo' : '🔴 Inativo'} • **${s.daysLeft}d**`)
+            .join('\n');
+          blocks.push(`👤 **Cliente:** <@${ownerId}> (\`${ownerId}\`) — **${stores.length} loja(s)**\n${storeLines}`);
+        }
+
+        const embed = new EmbedBuilder()
+          .setTitle(`👥 Todos os Clientes (${grouped.size})`)
+          .setDescription(blocks.join('\n\n').slice(0, 4000))
+          .setFooter({ text: 'Use /master remover_cliente ou /master remover_loja para remover da lista' })
+          .setColor('#3498db');
+
+        return interaction.reply({ embeds: [embed], ephemeral: true });
+      }
+
+      if (sub === 'remover_cliente') {
+        const ownerId = interaction.options.getString('id_dono').trim();
+        const removedCount = await db.deleteOwnerAndStores(ownerId);
+        if (!removedCount) {
+          return interaction.reply({ content: `❌ Nenhuma loja encontrada para o cliente \`${ownerId}\`.`, ephemeral: true });
+        }
+        return interaction.reply({
+          content: `🗑️ Cliente <@${ownerId}> (\`${ownerId}\`) e **${removedCount} loja(s)** removidos da lista com sucesso!`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === 'remover_loja') {
+        const guildId = interaction.options.getString('id_servidor').trim();
+        const ok = await db.deleteLicense(guildId);
+        if (!ok) {
+          return interaction.reply({ content: `❌ Loja/servidor \`${guildId}\` não encontrada.`, ephemeral: true });
+        }
+        return interaction.reply({
+          content: `🗑️ Loja do servidor \`${guildId}\` removida da lista com sucesso!`,
+          ephemeral: true
+        });
       }
 
       const guildId = interaction.options.getString('id_servidor').trim();
