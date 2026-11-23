@@ -28,11 +28,13 @@ function formatLicense(row) {
 
   return {
     guild_id: String(row.guild_id),
+    server_name: row.server_name ? String(row.server_name) : String(row.store_name || 'Servidor'),
     owner_id: String(row.owner_id),
     store_name: String(row.store_name || 'Hospedagem'),
     pix_key: row.pix_key ? String(row.pix_key) : null,
     store_photo: row.store_photo ? String(row.store_photo) : null,
     logs_channel_id: row.logs_channel_id ? String(row.logs_channel_id) : null,
+    block_reason: row.block_reason ? String(row.block_reason) : null,
     maintenance: Boolean(row.maintenance),
     active,
     expires_at: expiresAt,
@@ -79,20 +81,24 @@ async function initDB() {
   await client.execute(`
     CREATE TABLE IF NOT EXISTS licenses (
       guild_id TEXT PRIMARY KEY,
+      server_name TEXT,
       owner_id TEXT NOT NULL,
       store_name TEXT NOT NULL,
       pix_key TEXT,
       store_photo TEXT,
       logs_channel_id TEXT,
+      block_reason TEXT,
       maintenance INTEGER NOT NULL DEFAULT 0,
       active INTEGER NOT NULL DEFAULT 1,
       expires_at INTEGER NOT NULL
     )
   `);
 
+  await ensureColumn(client, 'licenses', 'server_name', 'TEXT');
   await ensureColumn(client, 'licenses', 'pix_key', 'TEXT');
   await ensureColumn(client, 'licenses', 'store_photo', 'TEXT');
   await ensureColumn(client, 'licenses', 'logs_channel_id', 'TEXT');
+  await ensureColumn(client, 'licenses', 'block_reason', 'TEXT');
   await ensureColumn(client, 'licenses', 'maintenance', 'INTEGER NOT NULL DEFAULT 0');
 
   await client.execute(`
@@ -185,8 +191,18 @@ async function initDB() {
     )
   `);
 
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      stars INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `);
+
   await client.execute('SELECT 1');
-  console.log('✅ Banco Turso conectado e atualizado.');
+  console.log('✅ Banco Turso conectado (Pacote Pro).');
   return client;
 }
 
@@ -207,7 +223,14 @@ async function getAuditLogs(limit = 30) {
   return res.rows;
 }
 
-// LICENÇAS / LOJAS (DONOS DO BOT)
+async function addReview(guildId, userId, stars) {
+  const client = getClient();
+  await client.execute({
+    sql: 'INSERT INTO reviews (guild_id, user_id, stars, created_at) VALUES (?, ?, ?, ?)',
+    args: [String(guildId), String(userId), Number(stars), Date.now()]
+  });
+}
+
 async function getLicense(guildId) {
   const client = getClient();
   const res = await client.execute({
@@ -232,34 +255,54 @@ async function getLicensesByOwner(ownerId) {
   return res.rows.map(formatLicense);
 }
 
-async function upsertLicense(guildId, ownerId, storeName, days) {
+async function upsertLicense(guildId, ownerId, storeName, days, serverName = null) {
   const client = getClient();
   const gid = String(guildId).trim();
   const oid = String(ownerId).trim();
   const name = String(storeName).trim();
+  const srvName = serverName && String(serverName).trim() ? String(serverName).trim() : (currentFallbackName(name));
   const numDays = Math.max(1, Number(days) || 1);
 
   const current = await getLicense(gid);
+  const resolvedServerName = serverName && String(serverName).trim()
+    ? String(serverName).trim()
+    : (current?.server_name || srvName);
+
   const baseTime = current && current.expires_at > Date.now() ? current.expires_at : Date.now();
   const expiresAt = baseTime + numDays * 24 * 60 * 60 * 1000;
 
   await client.execute({
     sql: `
-      INSERT INTO licenses (guild_id, owner_id, store_name, pix_key, store_photo, logs_channel_id, maintenance, active, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, 0, 1, ?)
+      INSERT INTO licenses (guild_id, server_name, owner_id, store_name, pix_key, store_photo, logs_channel_id, block_reason, maintenance, active, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, 1, ?)
       ON CONFLICT(guild_id) DO UPDATE SET
+        server_name = excluded.server_name,
         owner_id = excluded.owner_id,
         store_name = excluded.store_name,
+        block_reason = NULL,
         active = 1,
         expires_at = excluded.expires_at
     `,
-    args: [gid, oid, name, current?.pix_key || null, current?.store_photo || null, current?.logs_channel_id || null, expiresAt]
+    args: [
+      gid,
+      resolvedServerName,
+      oid,
+      name,
+      current?.pix_key || null,
+      current?.store_photo || null,
+      current?.logs_channel_id || null,
+      expiresAt
+    ]
   });
 
   return getLicense(gid);
 }
 
-async function updateLicenseDetails(guildId, { ownerId, storeName, days, active, pixKey, storePhoto, logsChannelId, maintenance }) {
+function currentFallbackName(name) {
+  return name;
+}
+
+async function updateLicenseDetails(guildId, { ownerId, storeName, serverName, days, active, pixKey, storePhoto, logsChannelId, maintenance, blockReason }) {
   const client = getClient();
   const gid = String(guildId).trim();
   const current = await getLicense(gid);
@@ -267,11 +310,15 @@ async function updateLicenseDetails(guildId, { ownerId, storeName, days, active,
 
   const nextOwnerId = ownerId !== undefined ? String(ownerId).trim() : current.owner_id;
   const nextStoreName = storeName !== undefined ? String(storeName).trim() : current.store_name;
+  const nextServerName = serverName !== undefined ? (String(serverName).trim() || current.server_name) : current.server_name;
   const nextActive = typeof active === 'boolean' ? (active ? 1 : 0) : (current.active ? 1 : 0);
   const nextMaint = typeof maintenance === 'boolean' ? (maintenance ? 1 : 0) : (current.maintenance ? 1 : 0);
   const nextPix = pixKey !== undefined ? (pixKey ? String(pixKey).trim() : null) : current.pix_key;
   const nextPhoto = storePhoto !== undefined ? (storePhoto ? String(storePhoto).trim() : null) : current.store_photo;
   const nextLogs = logsChannelId !== undefined ? (logsChannelId ? String(logsChannelId).trim() : null) : current.logs_channel_id;
+  const nextReason = nextActive === 0
+    ? (blockReason !== undefined ? (String(blockReason).trim() || 'Bloqueado pela administração') : (current.block_reason || 'Bloqueado pela administração'))
+    : null;
 
   let nextExpiresAt = current.expires_at;
   if (typeof days === 'number' && !Number.isNaN(days) && days >= 0) {
@@ -281,17 +328,17 @@ async function updateLicenseDetails(guildId, { ownerId, storeName, days, active,
   await client.execute({
     sql: `
       UPDATE licenses
-      SET owner_id = ?, store_name = ?, pix_key = ?, store_photo = ?, logs_channel_id = ?, maintenance = ?, active = ?, expires_at = ?
+      SET owner_id = ?, server_name = ?, store_name = ?, pix_key = ?, store_photo = ?, logs_channel_id = ?, block_reason = ?, maintenance = ?, active = ?, expires_at = ?
       WHERE guild_id = ?
     `,
-    args: [nextOwnerId, nextStoreName, nextPix, nextPhoto, nextLogs, nextMaint, nextActive, nextExpiresAt, gid]
+    args: [nextOwnerId, nextServerName, nextStoreName, nextPix, nextPhoto, nextLogs, nextReason, nextMaint, nextActive, nextExpiresAt, gid]
   });
 
   return getLicense(gid);
 }
 
-async function setLicenseStatus(guildId, active) {
-  return updateLicenseDetails(guildId, { active: Boolean(active) });
+async function setLicenseStatus(guildId, active, blockReason = null) {
+  return updateLicenseDetails(guildId, { active: Boolean(active), blockReason });
 }
 
 async function deleteLicense(guildId) {
@@ -316,7 +363,7 @@ async function deleteOwnerAndStores(ownerId) {
   return stores.length;
 }
 
-// PLANOS / PRODUTOS DE HOSPEDAGEM
+// PLANOS / PRODUTOS
 async function addProduct(guildId, name, description, price, durationDays = 30, specs = '') {
   const client = getClient();
   const res = await client.execute({
@@ -399,7 +446,7 @@ async function applyCoupon(guildId, code) {
   return res.rows[0] || null;
 }
 
-// PEDIDOS (APROVAÇÃO MANUAL PELO DONO/MASTER)
+// PEDIDOS & HOSPEDAGENS
 async function createOrder(guildId, customerId, product, couponCode = null) {
   const client = getClient();
   const originalPrice = Number(product.price);
@@ -411,10 +458,7 @@ async function createOrder(guildId, customerId, product, couponCode = null) {
     if (c) {
       appliedCoupon = c.code;
       finalPrice = Math.max(1, Number((originalPrice * (1 - Number(c.discount_percent) / 100)).toFixed(2)));
-      await client.execute({
-        sql: 'UPDATE coupons SET uses_left = uses_left - 1 WHERE id = ?',
-        args: [Number(c.id)]
-      });
+      await client.execute({ sql: 'UPDATE coupons SET uses_left = uses_left - 1 WHERE id = ?', args: [Number(c.id)] });
     }
   }
 
@@ -426,27 +470,12 @@ async function createOrder(guildId, customerId, product, couponCode = null) {
       INSERT INTO orders (order_code, guild_id, customer_id, product_id, plan_name, original_price, final_price, coupon_code, duration_days, status, created_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
     `,
-    args: [
-      tempCode,
-      String(guildId).trim(),
-      String(customerId).trim(),
-      Number(product.id),
-      String(product.name),
-      originalPrice,
-      finalPrice,
-      appliedCoupon,
-      Number(product.duration_days || 30),
-      now
-    ]
+    args: [tempCode, String(guildId).trim(), String(customerId).trim(), Number(product.id), String(product.name), originalPrice, finalPrice, appliedCoupon, Number(product.duration_days || 30), now]
   });
 
   const orderId = Number(res.lastInsertRowid);
   const formattedCode = `PED-${String(orderId).padStart(5, '0')}`;
-  await client.execute({
-    sql: 'UPDATE orders SET order_code = ? WHERE id = ?',
-    args: [formattedCode, orderId]
-  });
-
+  await client.execute({ sql: 'UPDATE orders SET order_code = ? WHERE id = ?', args: [formattedCode, orderId] });
   return getOrderByCode(formattedCode);
 }
 
@@ -503,57 +532,30 @@ async function approveOrderAndCreateHosting(orderCode, accessInfo = 'Liberado pe
       INSERT INTO hostings (code, guild_id, customer_id, plan_name, specs, price, status, access_info, created_at, expires_at)
       VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
     `,
-    args: [
-      tempHos,
-      order.guild_id,
-      order.customer_id,
-      order.plan_name,
-      product?.specs || product?.description || '',
-      Number(order.final_price),
-      String(accessInfo || 'Ativado'),
-      now,
-      expiresAt
-    ]
+    args: [tempHos, order.guild_id, order.customer_id, order.plan_name, product?.specs || product?.description || '', Number(order.final_price), String(accessInfo || 'Ativado'), now, expiresAt]
   });
 
   const hosId = Number(hosRes.lastInsertRowid);
   const hosCode = `HOS-${String(hosId).padStart(5, '0')}`;
-  await client.execute({
-    sql: 'UPDATE hostings SET code = ? WHERE id = ?',
-    args: [hosCode, hosId]
-  });
-
-  await client.execute({
-    sql: "UPDATE orders SET status = 'approved', hosting_code = ?, approved_at = ? WHERE id = ?",
-    args: [hosCode, now, Number(order.id)]
-  });
+  await client.execute({ sql: 'UPDATE hostings SET code = ? WHERE id = ?', args: [hosCode, hosId] });
+  await client.execute({ sql: "UPDATE orders SET status = 'approved', hosting_code = ?, approved_at = ? WHERE id = ?", args: [hosCode, now, Number(order.id)] });
 
   const hosting = await getHostingByCode(hosCode);
   const updatedOrder = await getOrderByCode(orderCode);
   return { order: updatedOrder, hosting, alreadyApproved: false };
 }
 
-async function cancelOrRefundOrder(orderCode, newStatus = 'cancelled') {
+async function refundOrder(orderCode) {
   const client = getClient();
   const order = await getOrderByCode(orderCode);
   if (!order) return null;
-
-  await client.execute({
-    sql: 'UPDATE orders SET status = ? WHERE id = ?',
-    args: [newStatus, Number(order.id)]
-  });
-
+  await client.execute({ sql: "UPDATE orders SET status = 'refunded' WHERE id = ?", args: [Number(order.id)] });
   if (order.hosting_code) {
-    await client.execute({
-      sql: "UPDATE hostings SET status = 'suspended' WHERE code = ?",
-      args: [order.hosting_code]
-    });
+    await client.execute({ sql: "UPDATE hostings SET status = 'suspended' WHERE code = ?", args: [order.hosting_code] });
   }
-
   return getOrderByCode(orderCode);
 }
 
-// HOSPEDAGENS DOS CLIENTES
 async function getHostingByCode(code) {
   const client = getClient();
   const res = await client.execute({
@@ -598,15 +600,17 @@ async function renewHosting(code, extraDays = 30) {
   const client = getClient();
   const hos = await getHostingByCode(code);
   if (!hos) return null;
-
   const base = hos.expires_at > Date.now() ? hos.expires_at : Date.now();
   const nextExpires = base + Math.max(1, Number(extraDays)) * 24 * 60 * 60 * 1000;
+  await client.execute({ sql: "UPDATE hostings SET status = 'active', expires_at = ? WHERE code = ?", args: [nextExpires, hos.code] });
+  return getHostingByCode(hos.code);
+}
 
-  await client.execute({
-    sql: "UPDATE hostings SET status = 'active', expires_at = ? WHERE code = ?",
-    args: [nextExpires, hos.code]
-  });
-
+async function transferHostingOwner(code, newCustomerId) {
+  const client = getClient();
+  const hos = await getHostingByCode(code);
+  if (!hos) return null;
+  await client.execute({ sql: 'UPDATE hostings SET customer_id = ? WHERE code = ?', args: [String(newCustomerId).trim(), hos.code] });
   return getHostingByCode(hos.code);
 }
 
@@ -614,12 +618,8 @@ async function updateHostingStatus(code, status, accessInfo = undefined) {
   const client = getClient();
   const hos = await getHostingByCode(code);
   if (!hos) return null;
-
   const nextAccess = accessInfo !== undefined ? String(accessInfo) : hos.access_info;
-  await client.execute({
-    sql: 'UPDATE hostings SET status = ?, access_info = ? WHERE code = ?',
-    args: [String(status), nextAccess, hos.code]
-  });
+  await client.execute({ sql: 'UPDATE hostings SET status = ?, access_info = ? WHERE code = ?', args: [String(status), nextAccess, hos.code] });
   return getHostingByCode(hos.code);
 }
 
@@ -679,17 +679,11 @@ async function markNotified(refKey) {
 async function getClientFullHistory(ownerId) {
   const stores = await getLicensesByOwner(ownerId);
   const result = [];
-
   for (const st of stores) {
     const products = await getProductsByGuild(st.guild_id);
     const orders = await getOrdersByGuild(st.guild_id);
     const hostings = await getHostingsByGuild(st.guild_id);
-    result.push({
-      ...st,
-      products,
-      orders,
-      hostings
-    });
+    result.push({ ...st, products, orders, hostings });
   }
   return result;
 }
@@ -700,6 +694,9 @@ async function getGlobalMetrics() {
   const client = getClient();
   const ordersRes = await client.execute('SELECT * FROM orders ORDER BY id DESC');
   const orders = ordersRes.rows;
+  const reviewsRes = await client.execute('SELECT stars FROM reviews');
+  const starsList = reviewsRes.rows.map(r => Number(r.stars || 0));
+  const avgRating = starsList.length ? (starsList.reduce((a, b) => a + b, 0) / starsList.length).toFixed(1) : '5.0';
 
   const approvedOrders = orders.filter(o => o.status === 'approved');
   const pendingOrders = orders.filter(o => o.status === 'pending');
@@ -716,9 +713,35 @@ async function getGlobalMetrics() {
     approvedOrdersCount: approvedOrders.length,
     pendingOrdersCount: pendingOrders.length,
     totalRevenue,
+    avgRating,
+    reviewsCount: starsList.length,
     licenses,
     hostings,
     orders
+  };
+}
+
+async function exportFullBackup() {
+  const client = getClient();
+  const [licenses, products, orders, hostings, coupons, auditLogs, reviews] = await Promise.all([
+    client.execute('SELECT * FROM licenses'),
+    client.execute('SELECT * FROM products'),
+    client.execute('SELECT * FROM orders'),
+    client.execute('SELECT * FROM hostings'),
+    client.execute('SELECT * FROM coupons'),
+    client.execute('SELECT * FROM audit_logs ORDER BY id DESC LIMIT 200'),
+    client.execute('SELECT * FROM reviews ORDER BY id DESC LIMIT 200')
+  ]);
+
+  return {
+    exportedAt: new Date().toISOString(),
+    licenses: licenses.rows,
+    products: products.rows,
+    orders: orders.rows,
+    hostings: hostings.rows,
+    coupons: coupons.rows,
+    auditLogs: auditLogs.rows,
+    reviews: reviews.rows
   };
 }
 
@@ -726,6 +749,7 @@ module.exports = {
   initDB,
   logAudit,
   getAuditLogs,
+  addReview,
   getLicense,
   getAllLicenses,
   getLicensesByOwner,
@@ -746,12 +770,13 @@ module.exports = {
   getOrdersByGuild,
   getOrdersByCustomer,
   approveOrderAndCreateHosting,
-  cancelOrRefundOrder,
+  refundOrder,
   getHostingByCode,
   getHostingsByCustomer,
   getHostingsByGuild,
   getAllHostings,
   renewHosting,
+  transferHostingOwner,
   updateHostingStatus,
   deleteHosting,
   registerFixedPanel,
@@ -760,5 +785,6 @@ module.exports = {
   wasNotified,
   markNotified,
   getClientFullHistory,
-  getGlobalMetrics
+  getGlobalMetrics,
+  exportFullBackup
 };
