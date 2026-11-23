@@ -79,7 +79,6 @@ async function initDB() {
     )
   `);
 
-  // Teste rápido de conexão
   await client.execute('SELECT 1');
   console.log('✅ Banco Turso conectado.');
   return client;
@@ -178,6 +177,68 @@ async function setLicenseStatus(guildId, active) {
     args: [active ? 1 : 0, gid]
   });
   return getLicense(gid);
+}
+
+async function deleteLicense(guildId) {
+  const client = getClient();
+  const gid = String(guildId).trim();
+  const current = await getLicense(gid);
+  if (!current) return false;
+
+  await client.execute({
+    sql: 'DELETE FROM products WHERE guild_id = ?',
+    args: [gid]
+  });
+  await client.execute({
+    sql: 'DELETE FROM licenses WHERE guild_id = ?',
+    args: [gid]
+  });
+  return true;
+}
+
+async function deleteOwnerAndStores(ownerId) {
+  const client = getClient();
+  const oid = String(ownerId).trim();
+  const stores = await getLicensesByOwner(oid);
+  if (!stores.length) return 0;
+
+  for (const st of stores) {
+    await client.execute({
+      sql: 'DELETE FROM products WHERE guild_id = ?',
+      args: [st.guild_id]
+    });
+  }
+  await client.execute({
+    sql: 'DELETE FROM licenses WHERE owner_id = ?',
+    args: [oid]
+  });
+  return stores.length;
+}
+
+async function getClientFullHistory(ownerId) {
+  const stores = await getLicensesByOwner(ownerId);
+  const detailedStores = [];
+
+  for (const st of stores) {
+    const prods = await getProductsByGuild(st.guild_id);
+    const formattedProds = prods.map((p) => {
+      const stockItems = JSON.parse(p.stock || '[]');
+      return {
+        id: Number(p.id),
+        guild_id: String(p.guild_id),
+        name: String(p.name),
+        description: String(p.description),
+        price: Number(p.price),
+        stockCount: stockItems.length
+      };
+    });
+    detailedStores.push({
+      ...st,
+      products: formattedProds
+    });
+  }
+
+  return detailedStores;
 }
 
 async function setMpToken(guildId, token) {
@@ -294,9 +355,12 @@ module.exports = {
   getLicense,
   getAllLicenses,
   getLicensesByOwner,
+  getClientFullHistory,
   upsertLicense,
   updateLicenseDetails,
   setLicenseStatus,
+  deleteLicense,
+  deleteOwnerAndStores,
   setMpToken,
   setStorePhoto,
   addProduct,
