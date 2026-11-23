@@ -45,6 +45,14 @@ function formatDateBR(ts) {
   return new Date(Number(ts)).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
 }
 
+async function resolveServerDisplayName(license) {
+  if (license?.server_name && String(license.server_name).trim()) {
+    return String(license.server_name).trim();
+  }
+  const guild = client.guilds.cache.get(license.guild_id) || (await client.guilds.fetch(license.guild_id).catch(() => null));
+  return guild?.name || license.store_name || 'Servidor';
+}
+
 async function findMainTextChannel(guild) {
   if (!guild) return null;
   await guild.channels.fetch().catch(() => null);
@@ -62,39 +70,60 @@ async function findMainTextChannel(guild) {
   );
 }
 
+async function sendUserAlert(userId, content) {
+  try {
+    const user = await client.users.fetch(userId);
+    if (user) await user.send(content);
+  } catch {
+    // DM fechada
+  }
+}
+
 async function notifyLicenseActivated(license) {
   if (!license) return;
-
-  const guild = client.guilds.cache.get(license.guild_id) || (await client.guilds.fetch(license.guild_id).catch(() => null));
-  const guildName = guild ? guild.name : license.guild_id;
+  const serverDisplayName = await resolveServerDisplayName(license);
 
   const dmText =
     `✅ **Robô Profissional de Hospedagem Ativado!**\n\n` +
     `🏢 **Empresa/Loja:** ${license.store_name}\n` +
-    `🖥️ **Servidor:** ${guildName} (\`${license.guild_id}\`)\n` +
+    `🖥️ **Servidor:** **${serverDisplayName}**\n` +
     `⚡ **Estado do Robô:** 🟢 Ligado / Ativo 24h\n` +
     `⏳ **Prazo:** **${license.daysLeft} dia(s)**\n` +
     `💬 **Discord Oficial:** ${OFFICIAL_DISCORD}`;
 
-  try {
-    const ownerUser = await client.users.fetch(license.owner_id);
-    if (ownerUser) await ownerUser.send(dmText);
-  } catch (err) {
-    console.warn('⚠️ DM fechada do dono:', err.message);
-  }
+  await sendUserAlert(license.owner_id, dmText);
 
+  const guild = client.guilds.cache.get(license.guild_id) || (await client.guilds.fetch(license.guild_id).catch(() => null));
   if (guild) {
     const channel = await findMainTextChannel(guild);
     if (channel) {
       await channel.send(
         `🟢 **Robô de Hospedagem Ligado e Ativo!**\n` +
         `• **Empresa:** **${license.store_name}**\n` +
+        `• **Servidor:** **${serverDisplayName}**\n` +
         `• **Dono:** <@${license.owner_id}>\n` +
         `• **Duração:** **${license.daysLeft} dia(s)**\n` +
         `• **Discord Oficial:** ${OFFICIAL_DISCORD}`
       ).catch(() => {});
     }
   }
+}
+
+async function notifyLicenseBlocked(license, reason) {
+  if (!license) return;
+  const serverDisplayName = await resolveServerDisplayName(license);
+  const finalReason = reason && String(reason).trim()
+    ? String(reason).trim()
+    : (license.block_reason || 'Bloqueado pela administração');
+
+  await sendUserAlert(
+    license.owner_id,
+    `🔒 **Aviso de Bloqueio — ${license.store_name}**\n\n` +
+    `🖥️ **Servidor:** **${serverDisplayName}**\n` +
+    `⚡ **Estado do Robô:** 🔴 Bloqueado\n` +
+    `📝 **Motivo:** **${finalReason}**\n` +
+    `💬 **Discord Oficial:** ${OFFICIAL_DISCORD}`
+  );
 }
 
 client.on('guildCreate', async (guild) => {
@@ -106,7 +135,32 @@ client.on('guildCreate', async (guild) => {
   }
 });
 
-// CONSTRUTORES DOS 3 PAINÉIS FIXOS (MASTER, DONO, CLIENTE)
+// PAINÉIS FIXOS (MASTER, DONO, CLIENTE, TICKET)
+function renderTicketFixedPanel(storeName, storePhoto) {
+  const embed = new EmbedBuilder()
+    .setTitle(`🎫 Central de Atendimento — ${storeName}`)
+    .setDescription(
+      'Escolha abaixo a categoria do seu atendimento para abrir um canal privado com a equipe:\n\n' +
+      '• 🛠️ **Suporte Técnico:** configuração, painel, acesso ou dúvidas técnicas\n' +
+      '• 💠 **Financeiro / PIX:** comprovantes, renovações, cupons ou reembolsos\n' +
+      '• 🛒 **Vendas / Planos:** contratação de hospedagem ou planos personalizados'
+    )
+    .setColor('#3498db')
+    .setFooter({ text: 'Painel fixo de tickets • Atendimento organizado' });
+
+  if (storePhoto && isValidImageUrl(storePhoto)) {
+    embed.setThumbnail(storePhoto);
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('open_ticket_tecnico').setLabel('Suporte Técnico').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('open_ticket_financeiro').setLabel('Financeiro / PIX').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('open_ticket_vendas').setLabel('Vendas / Planos').setStyle(ButtonStyle.Secondary)
+  );
+
+  return { embeds: [embed], components: [row] };
+}
+
 async function renderMasterFixedPanel() {
   const m = await db.getGlobalMetrics();
 
@@ -119,7 +173,7 @@ async function renderMasterFixedPanel() {
       { name: '🖥️ Hospedagens Ativas', value: `**${m.activeHostings}/${m.totalHostings}**`, inline: true },
       { name: '💰 Vendas Aprovadas', value: `**R$ ${m.totalRevenue.toFixed(2)}** (${m.approvedOrdersCount})`, inline: true },
       { name: '⏳ Pedidos Pendentes', value: `**${m.pendingOrdersCount}**`, inline: true },
-      { name: '📡 Monitoramento', value: 'Bot: 🟢 Online\nBanco: 🟢 Online\nSite: 🟢 Online', inline: true }
+      { name: '⭐ Avaliação Média', value: `**${m.avgRating}★** (${m.reviewsCount})`, inline: true }
     )
     .setColor('#f1c40f')
     .setFooter({ text: 'Painel fixo atualizado automaticamente 24h' });
@@ -155,12 +209,12 @@ async function renderOwnerFixedPanel(guildId) {
       `${license.isOperational ? '🟢 **SISTEMA ONLINE**' : '🔴 **SISTEMA PAUSADO/MANUTENÇÃO**'} • Atualizado às ${new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`
     )
     .addFields(
+      { name: '🖥️ Servidor', value: `**${license.server_name}**`, inline: true },
       { name: '⏳ Licença do Robô', value: `**${license.daysLeft} dia(s)**`, inline: true },
       { name: '💳 Chave PIX', value: license.pix_key ? `\`${license.pix_key}\`` : '❌ Não definida', inline: true },
       { name: '📦 Planos Ativos', value: `**${products.length}**`, inline: true },
       { name: '🖥️ Hospedagens Ativas', value: `**${activeHos.length}/${hostings.length}**`, inline: true },
-      { name: '⏳ Pedidos Aguardando', value: `**${pending.length}**`, inline: true },
-      { name: '💰 Faturamento', value: `**R$ ${revenue.toFixed(2)}**`, inline: true }
+      { name: '💰 Faturamento', value: `**R$ ${revenue.toFixed(2)}** (${pending.length} pendente(s))`, inline: true }
     )
     .setColor('#2ecc71')
     .setFooter({ text: 'Painel fixo do dono • Atualização automática 24h' });
@@ -240,6 +294,10 @@ async function refreshAllFixedPanels() {
       if (p.panel_type === 'master') payload = await renderMasterFixedPanel();
       if (p.panel_type === 'owner') payload = await renderOwnerFixedPanel(p.guild_id);
       if (p.panel_type === 'customer') payload = await renderCustomerFixedPanel(p.guild_id, p.target_id);
+      if (p.panel_type === 'ticket') {
+        const lic = await db.getLicense(p.guild_id);
+        payload = renderTicketFixedPanel(lic?.store_name || 'Atendimento', lic?.store_photo || null);
+      }
 
       if (payload) await msg.edit(payload);
     } catch (err) {
@@ -248,7 +306,12 @@ async function refreshAllFixedPanels() {
   }
 }
 
-// WORKER 24H: VERIFICA VENCIMENTOS (7D, 3D, 1D ANTES, NO VENCIMENTO E APÓS) + ATUALIZA PAINÉIS FIXOS
+function calcDaysExact(expiresAt, now = Date.now()) {
+  const diff = Number(expiresAt) - now;
+  if (diff <= 0) return 0;
+  return Math.ceil(diff / (1000 * 60 * 60 * 24));
+}
+
 async function runScheduledChecks() {
   try {
     const allHostings = await db.getAllHostings();
@@ -257,7 +320,6 @@ async function runScheduledChecks() {
     for (const hos of allHostings) {
       const daysLeft = calcDaysExact(hos.expires_at, now);
 
-      // Alertas de 7 dias, 3 dias e 1 dia antes
       for (const milestone of [7, 3, 1]) {
         if (hos.status === 'active' && daysLeft === milestone) {
           const ref = `hos_${hos.code}_warn_${milestone}d`;
@@ -266,14 +328,13 @@ async function runScheduledChecks() {
               hos.customer_id,
               `⚠️ **Aviso de Vencimento — ${hos.code}**\n` +
               `Sua hospedagem **${hos.plan_name}** vence em **${milestone} dia(s)** (${formatDateBR(hos.expires_at)}).\n` +
-              `Use \`/painel\` ou \`/renovar\` no servidor para renovar e evitar suspensão!`
+              `Use \`/painel\` no servidor para renovar e evitar suspensão!`
             );
             await db.markNotified(ref);
           }
         }
       }
 
-      // Venceu agora -> suspende e avisa
       if (hos.status === 'active' && hos.expires_at <= now) {
         await db.updateHostingStatus(hos.code, 'suspended');
         const refExp = `hos_${hos.code}_expired`;
@@ -281,24 +342,23 @@ async function runScheduledChecks() {
           await sendUserAlert(
             hos.customer_id,
             `🔴 **Hospedagem Suspensa por Vencimento — ${hos.code}**\n` +
-            `Sua hospedagem **${hos.plan_name}** venceu em ${formatDateBR(hos.expires_at)} e foi suspensa.\n` +
-            `Renove no servidor para reativar imediatamente!`
+            `Sua hospedagem **${hos.plan_name}** venceu em ${formatDateBR(hos.expires_at)} e foi suspensa.`
           );
           await db.markNotified(refExp);
         }
       }
     }
 
-    // Alerta de 1 dia antes para donos de licença do bot
     const licenses = await db.getAllLicenses();
     for (const lic of licenses) {
       if (lic.active && lic.daysLeft === 1) {
+        const serverDisplayName = await resolveServerDisplayName(lic);
         const ref = `lic_${lic.guild_id}_1d_${formatDateBR(lic.expires_at)}`;
         if (!(await db.wasNotified(ref))) {
           await sendUserAlert(
             lic.owner_id,
             `⏳ **Aviso de Aluguel do Robô — ${lic.store_name}**\n` +
-            `Falta **1 dia** para o vencimento da licença do seu servidor (\`${lic.guild_id}\`).\n` +
+            `Falta **1 dia** para o vencimento da licença do servidor **${serverDisplayName}**.\n` +
             `Entre em contato no Discord Oficial (${OFFICIAL_DISCORD}) para renovar.`
           );
           await db.markNotified(ref);
@@ -312,22 +372,6 @@ async function runScheduledChecks() {
   }
 }
 
-function calcDaysExact(expiresAt, now = Date.now()) {
-  const diff = Number(expiresAt) - now;
-  if (diff <= 0) return 0;
-  return Math.ceil(diff / (1000 * 60 * 60 * 24));
-}
-
-async function sendUserAlert(userId, content) {
-  try {
-    const user = await client.users.fetch(userId);
-    if (user) await user.send(content);
-  } catch {
-    // Usuário com DM fechada
-  }
-}
-
-// SLASH COMMANDS
 const commands = [
   new SlashCommandBuilder()
     .setName('admin')
@@ -340,6 +384,7 @@ const commands = [
         .addStringOption(o => o.setName('id_dono').setDescription('ID do Dono').setRequired(true))
         .addStringOption(o => o.setName('nome_empresa').setDescription('Nome da Empresa/Loja').setRequired(true))
         .addIntegerOption(o => o.setName('dias').setDescription('Dias de licença').setRequired(true))
+        .addStringOption(o => o.setName('nome_servidor').setDescription('Nome do servidor para exibir na DM (opcional)').setRequired(false))
     )
     .addSubcommand(s => s.setName('clientes').setDescription('Lista todos os clientes (donos) e suas lojas'))
     .addSubcommand(s =>
@@ -354,8 +399,9 @@ const commands = [
     )
     .addSubcommand(s =>
       s.setName('bloquear')
-        .setDescription('Bloqueia um servidor')
+        .setDescription('Bloqueia um servidor com motivo e avisa o dono na DM')
         .addStringOption(o => o.setName('id_servidor').setDescription('ID do Servidor').setRequired(true))
+        .addStringOption(o => o.setName('motivo').setDescription('Motivo do bloqueio (exibido na DM do dono)').setRequired(true))
     )
     .addSubcommand(s =>
       s.setName('desbloquear')
@@ -370,7 +416,7 @@ const commands = [
     .addSubcommand(s => s.setName('painel_fixo').setDescription('Fixa o painel da sua empresa neste canal (atualiza 24h)'))
     .addSubcommand(s =>
       s.setName('config_pix')
-        .setDescription('Define sua Chave PIX (CPF, CNPJ, E-mail, Telefone ou Aleatória) para receber')
+        .setDescription('Define sua Chave PIX para receber pagamentos')
         .addStringOption(o => o.setName('chave_pix').setDescription('Sua chave PIX').setRequired(true))
     )
     .addSubcommand(s =>
@@ -391,26 +437,31 @@ const commands = [
     .addSubcommand(s =>
       s.setName('criar_plano')
         .setDescription('Cria plano de hospedagem e exibe o ID')
-        .addStringOption(o => o.setName('nome').setDescription('Nome do plano (ex: Host Bot Basic)').setRequired(true))
+        .addStringOption(o => o.setName('nome').setDescription('Nome do plano').setRequired(true))
         .addNumberOption(o => o.setName('preco').setDescription('Preço em R$').setRequired(true))
-        .addIntegerOption(o => o.setName('dias').setDescription('Duração em dias (padrão 30)').setRequired(true))
+        .addIntegerOption(o => o.setName('dias').setDescription('Duração em dias').setRequired(true))
         .addStringOption(o => o.setName('especificacoes').setDescription('RAM, CPU, SSD, detalhes').setRequired(true))
     )
     .addSubcommand(s =>
       s.setName('criar_cupom')
         .setDescription('Cria cupom de desconto para clientes')
-        .addStringOption(o => o.setName('codigo').setDescription('Código do cupom (ex: PROMO10)').setRequired(true))
+        .addStringOption(o => o.setName('codigo').setDescription('Código do cupom').setRequired(true))
         .addIntegerOption(o => o.setName('desconto').setDescription('Porcentagem de desconto (1 a 95)').setRequired(true))
     )
     .addSubcommand(s =>
       s.setName('aprovar_pedido')
         .setDescription('Confirma PIX recebido e libera a hospedagem do cliente')
         .addStringOption(o => o.setName('codigo_pedido').setDescription('Código do pedido (ex: PED-00001)').setRequired(true))
-        .addStringOption(o => o.setName('dados_acesso').setDescription('Link do painel, IP, usuário/senha entregues ao cliente').setRequired(true))
+        .addStringOption(o => o.setName('dados_acesso').setDescription('Link do painel, IP, usuário/senha').setRequired(true))
+    )
+    .addSubcommand(s =>
+      s.setName('reembolsar_pedido')
+        .setDescription('Marca pedido como reembolsado e suspende a hospedagem vinculada')
+        .addStringOption(o => o.setName('codigo_pedido').setDescription('Código do pedido (ex: PED-00001)').setRequired(true))
     )
     .addSubcommand(s =>
       s.setName('gerenciar_hospedagem')
-        .setDescription('Renova, suspende, reativa ou exclui uma hospedagem')
+        .setDescription('Renova, suspende, reativa, transfere ou exclui uma hospedagem')
         .addStringOption(o => o.setName('codigo_hospedagem').setDescription('Código (ex: HOS-00001)').setRequired(true))
         .addStringOption(o =>
           o.setName('acao')
@@ -425,10 +476,20 @@ const commands = [
         )
     )
     .addSubcommand(s =>
+      s.setName('transferir_hospedagem')
+        .setDescription('Transfere a titularidade de uma hospedagem para outro cliente')
+        .addStringOption(o => o.setName('codigo_hospedagem').setDescription('Código (ex: HOS-00001)').setRequired(true))
+        .addStringOption(o => o.setName('novo_dono_id').setDescription('ID do novo cliente no Discord').setRequired(true))
+    )
+    .addSubcommand(s =>
       s.setName('enviar_vitrine')
         .setDescription('Envia vitrine de compra de um plano neste canal')
         .addIntegerOption(o => o.setName('id_plano').setDescription('ID do plano').setRequired(true))
     ),
+
+  new SlashCommandBuilder()
+    .setName('painel_ticket')
+    .setDescription('[DONO/ADMIN] Fixa um painel permanente de tickets com categorias neste canal'),
 
   new SlashCommandBuilder()
     .setName('produtos')
@@ -468,7 +529,7 @@ async function registerCommands() {
   try {
     const rest = new REST({ version: '10' }).setToken(token);
     await rest.put(Routes.applicationCommands(clientId), { body: commands });
-    console.log('✅ Comandos registrados.');
+    console.log('✅ Comandos registrados (Pacote Pro).');
   } catch (e) {
     console.error('❌ Erro ao registrar comandos:', e);
   }
@@ -488,6 +549,36 @@ async function onBotReady() {
 
 client.once('clientReady', onBotReady);
 client.once('ready', onBotReady);
+
+async function openTicketChannel(interaction, category) {
+  const license = await db.getLicense(interaction.guildId);
+  const channelName = `ticket-${category}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30);
+
+  const overwrites = [
+    { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+    { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
+  ];
+  if (license?.owner_id) {
+    overwrites.push({ id: license.owner_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] });
+  }
+
+  const ticketChannel = await interaction.guild.channels.create({
+    name: channelName,
+    type: ChannelType.GuildText,
+    permissionOverwrites: overwrites
+  });
+
+  const closeRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('close_ticket').setLabel('Fechar Ticket').setStyle(ButtonStyle.Danger)
+  );
+
+  await ticketChannel.send({
+    content: `🎫 **Ticket Aberto — Categoria: ${category.toUpperCase()}**\nCliente: <@${interaction.user.id}>${license?.owner_id ? ` • Responsável: <@${license.owner_id}>` : ''}`,
+    components: [closeRow]
+  });
+
+  return interaction.reply({ content: `✅ Ticket aberto em <#${ticketChannel.id}>!`, ephemeral: true });
+}
 
 async function buildProductsView(guildId) {
   const products = await db.getProductsByGuild(guildId);
@@ -531,7 +622,7 @@ client.on('interactionCreate', async (interaction) => {
   try {
     const isMaster = interaction.user.id === process.env.MASTER_ID?.trim();
 
-    // /ADMIN (MASTER)
+    // /ADMIN
     if (interaction.isChatInputCommand() && interaction.commandName === 'admin') {
       if (!isMaster) {
         return interaction.reply({ content: '⛔ Acesso negado. Comando exclusivo do Master.', ephemeral: true });
@@ -550,12 +641,14 @@ client.on('interactionCreate', async (interaction) => {
         const ownerId = interaction.options.getString('id_dono').trim();
         const storeName = interaction.options.getString('nome_empresa').trim();
         const days = interaction.options.getInteger('dias');
-        const lic = await db.upsertLicense(guildId, ownerId, storeName, days);
+        const serverName = interaction.options.getString('nome_servidor')?.trim() || null;
+
+        const lic = await db.upsertLicense(guildId, ownerId, storeName, days, serverName);
         await db.logAudit(guildId, interaction.user.id, 'ATIVAR_LICENCA', `${storeName} (${days}d) para ${ownerId}`);
         await notifyLicenseActivated(lic);
         await refreshAllFixedPanels();
         return interaction.reply({
-          content: `✅ Empresa **${lic.store_name}** (\`${lic.guild_id}\`) ativada para <@${lic.owner_id}> por **${lic.daysLeft}d** e avisos enviados!`,
+          content: `✅ Empresa **${lic.store_name}** (Servidor: **${lic.server_name}**) ativada para <@${lic.owner_id}> por **${lic.daysLeft}d** e avisos enviados!`,
           ephemeral: true
         });
       }
@@ -569,7 +662,7 @@ client.on('interactionCreate', async (interaction) => {
           grouped.get(l.owner_id).push(l);
         }
         const text = Array.from(grouped.entries()).map(([oid, list]) => {
-          const lines = list.map(s => `  ↳ **${s.store_name}** (\`${s.guild_id}\`) — ${s.isOperational ? '🟢 Ativo' : '🔴 Inativo'} (${s.daysLeft}d)`).join('\n');
+          const lines = list.map(s => `  ↳ **${s.store_name}** (${s.server_name}) — ${s.isOperational ? '🟢 Ativo' : '🔴 Inativo'} (${s.daysLeft}d)`).join('\n');
           return `👤 **Cliente:** <@${oid}> (\`${oid}\`)\n${lines}`;
         }).join('\n\n');
         return interaction.reply({
@@ -594,14 +687,28 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: ok ? `🗑️ Loja \`${gid}\` removida!` : '❌ Loja não encontrada.', ephemeral: true });
       }
 
-      if (sub === 'bloquear' || sub === 'desbloquear') {
+      if (sub === 'bloquear') {
         const gid = interaction.options.getString('id_servidor').trim();
-        const active = sub === 'desbloquear';
-        const lic = await db.setLicenseStatus(gid, active);
-        if (active && lic?.isOperational) await notifyLicenseActivated(lic);
-        await db.logAudit(gid, interaction.user.id, active ? 'DESBLOQUEAR' : 'BLOQUEAR', gid);
+        const motivo = interaction.options.getString('motivo').trim();
+        const lic = await db.setLicenseStatus(gid, false, motivo);
+        if (!lic) return interaction.reply({ content: '❌ Servidor não encontrado.', ephemeral: true });
+        await notifyLicenseBlocked(lic, motivo);
+        await db.logAudit(gid, interaction.user.id, 'BLOQUEAR', `Motivo: ${motivo}`);
         await refreshAllFixedPanels();
-        return interaction.reply({ content: `${active ? '🔓 Desbloqueado' : '🔒 Bloqueado'}: \`${gid}\``, ephemeral: true });
+        return interaction.reply({
+          content: `🔒 Servidor **${lic.server_name}** bloqueado!\n📩 Dono avisado na DM com o motivo: **${motivo}**`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === 'desbloquear') {
+        const gid = interaction.options.getString('id_servidor').trim();
+        const lic = await db.setLicenseStatus(gid, true, null);
+        if (!lic) return interaction.reply({ content: '❌ Servidor não encontrado.', ephemeral: true });
+        if (lic.isOperational) await notifyLicenseActivated(lic);
+        await db.logAudit(gid, interaction.user.id, 'DESBLOQUEAR', gid);
+        await refreshAllFixedPanels();
+        return interaction.reply({ content: `🔓 Desbloqueado: **${lic.server_name}**`, ephemeral: true });
       }
 
       if (sub === 'logs') {
@@ -621,20 +728,39 @@ client.on('interactionCreate', async (interaction) => {
       if (interaction.customId === 'fp_master_clients') {
         if (!isMaster) return interaction.reply({ content: '⛔ Exclusivo do Master.', ephemeral: true });
         const all = await db.getAllLicenses();
-        const text = all.map(l => `• **${l.store_name}** (\`${l.guild_id}\`) — Dono: <@${l.owner_id}> | ${l.daysLeft}d`).join('\n') || 'Nenhum cliente.';
+        const text = all.map(l => `• **${l.store_name}** (${l.server_name}) — Dono: <@${l.owner_id}> | ${l.daysLeft}d`).join('\n') || 'Nenhum cliente.';
         return interaction.reply({ content: text.slice(0, 1900), ephemeral: true });
       }
       if (interaction.customId === 'fp_master_pending') {
         if (!isMaster) return interaction.reply({ content: '⛔ Exclusivo do Master.', ephemeral: true });
         const m = await db.getGlobalMetrics();
         const pend = m.orders.filter(o => o.status === 'pending').slice(0, 15);
-        const text = pend.map(o => `• **${o.order_code}** | Servidor \`${o.guild_id}\` | <@${o.customer_id}> | R$ ${Number(o.final_price).toFixed(2)}`).join('\n') || 'Nenhum pedido pendente.';
+        const text = pend.map(o => `• **${o.order_code}** | <@${o.customer_id}> | R$ ${Number(o.final_price).toFixed(2)}`).join('\n') || 'Nenhum pedido pendente.';
         return interaction.reply({ content: text.slice(0, 1900), ephemeral: true });
       }
     }
 
     if (!interaction.guildId) return;
     const license = await db.getLicense(interaction.guildId);
+
+    // /PAINEL_TICKET (PODE SER FIXADO POR DONO OU MASTER)
+    if (interaction.isChatInputCommand() && interaction.commandName === 'painel_ticket') {
+      if (!isMaster && interaction.user.id !== license?.owner_id) {
+        return interaction.reply({ content: '⛔ Apenas o dono da loja ou Master pode fixar o painel de tickets.', ephemeral: true });
+      }
+      const storeName = license?.store_name || interaction.guild.name;
+      const storePhoto = license?.store_photo || null;
+      const payload = renderTicketFixedPanel(storeName, storePhoto);
+      const msg = await interaction.channel.send(payload);
+      await db.registerFixedPanel('ticket', interaction.guildId, license?.owner_id || interaction.user.id, interaction.channelId, msg.id);
+      return interaction.reply({ content: '✅ Painel de tickets fixo com categorias criado neste canal!', ephemeral: true });
+    }
+
+    // BOTÕES DE ABRIR TICKET POR CATEGORIA
+    if (interaction.isButton() && interaction.customId.startsWith('open_ticket_')) {
+      const category = interaction.customId.replace('open_ticket_', '');
+      return openTicketChannel(interaction, category);
+    }
 
     if (!license || (!license.isOperational && interaction.user.id !== license.owner_id && !isMaster)) {
       if (interaction.isRepliable()) {
@@ -665,7 +791,7 @@ client.on('interactionCreate', async (interaction) => {
         await db.updateLicenseDetails(interaction.guildId, { pixKey: key });
         await db.logAudit(interaction.guildId, interaction.user.id, 'CONFIG_PIX', 'Chave PIX atualizada');
         await refreshAllFixedPanels();
-        return interaction.reply({ content: `✅ Chave PIX definida como \`${key}\`! Os clientes receberão ela ao gerar pedidos.`, ephemeral: true });
+        return interaction.reply({ content: `✅ Chave PIX definida como \`${key}\`!`, ephemeral: true });
       }
 
       if (sub === 'foto_loja') {
@@ -702,10 +828,7 @@ client.on('interactionCreate', async (interaction) => {
         const info = await db.addProduct(interaction.guildId, nome, specs, preco, dias, specs);
         await refreshAllFixedPanels();
         return interaction.reply({
-          content:
-            `✅ Plano **${nome}** criado!\n` +
-            `🆔 **ID do Plano:** **#${info.id}**\n` +
-            `💵 **Valor:** R$ ${preco.toFixed(2)} por **${dias} dia(s)**`,
+          content: `✅ Plano **${nome}** criado!\n🆔 **ID do Plano:** **#${info.id}**\n💵 **Valor:** R$ ${preco.toFixed(2)} por **${dias} dia(s)**`,
           ephemeral: true
         });
       }
@@ -746,6 +869,19 @@ client.on('interactionCreate', async (interaction) => {
         });
       }
 
+      if (sub === 'reembolsar_pedido') {
+        const orderCode = interaction.options.getString('codigo_pedido').trim().toUpperCase();
+        const existing = await db.getOrderByCode(orderCode);
+        if (!existing || existing.guild_id !== interaction.guildId) {
+          return interaction.reply({ content: `❌ Pedido **${orderCode}** não encontrado nesta loja.`, ephemeral: true });
+        }
+        const refunded = await db.refundOrder(orderCode);
+        await db.logAudit(interaction.guildId, interaction.user.id, 'REEMBOLSAR_PEDIDO', orderCode);
+        await sendUserAlert(refunded.customer_id, `💸 **Reembolso Registrado — ${orderCode}**\nSeu pedido foi reembolsado e a hospedagem vinculada (se houver) foi suspensa.`);
+        await refreshAllFixedPanels();
+        return interaction.reply({ content: `💸 Pedido **${orderCode}** marcado como reembolsado.`, ephemeral: true });
+      }
+
       if (sub === 'gerenciar_hospedagem') {
         const hosCode = interaction.options.getString('codigo_hospedagem').trim().toUpperCase();
         const acao = interaction.options.getString('acao');
@@ -777,6 +913,19 @@ client.on('interactionCreate', async (interaction) => {
           await refreshAllFixedPanels();
           return interaction.reply({ content: `🗑️ **${hosCode}** excluída.`, ephemeral: true });
         }
+      }
+
+      if (sub === 'transferir_hospedagem') {
+        const hosCode = interaction.options.getString('codigo_hospedagem').trim().toUpperCase();
+        const newOwnerId = interaction.options.getString('novo_dono_id').trim();
+        const hos = await db.getHostingByCode(hosCode);
+        if (!hos || hos.guild_id !== interaction.guildId) {
+          return interaction.reply({ content: `❌ Hospedagem **${hosCode}** não encontrada.`, ephemeral: true });
+        }
+        await db.transferHostingOwner(hosCode, newOwnerId);
+        await sendUserAlert(newOwnerId, `🔄 **Titularidade Transferida — ${hosCode}**\nVocê agora é o titular da hospedagem **${hos.plan_name}** na loja **${license.store_name}**.`);
+        await refreshAllFixedPanels();
+        return interaction.reply({ content: `✅ Hospedagem **${hosCode}** transferida para <@${newOwnerId}>!`, ephemeral: true });
       }
 
       if (sub === 'enviar_vitrine') {
@@ -819,10 +968,7 @@ client.on('interactionCreate', async (interaction) => {
         if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Exclusivo do dono.', ephemeral: true });
         const orders = (await db.getOrdersByGuild(interaction.guildId)).filter(o => o.status === 'pending');
         const text = orders.map(o => `• **${o.order_code}** — <@${o.customer_id}> | **${o.plan_name}** | R$ ${Number(o.final_price).toFixed(2)}`).join('\n') || 'Nenhum pedido aguardando aprovação.';
-        return interaction.reply({
-          content: `⏳ **Pedidos Aguardando PIX:**\n${text}\n\n*Use \`/painel_dono aprovar_pedido\` para liberar.*`.slice(0, 1950),
-          ephemeral: true
-        });
+        return interaction.reply({ content: `⏳ **Pedidos Aguardando PIX:**\n${text}`.slice(0, 1950), ephemeral: true });
       }
       if (interaction.customId === 'fp_owner_hostings') {
         if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Exclusivo do dono.', ephemeral: true });
@@ -832,7 +978,7 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
-    // /PRODUTOS (GERENCIAR PLANOS)
+    // /PRODUTOS
     if (interaction.isChatInputCommand() && interaction.commandName === 'produtos') {
       if (interaction.user.id !== license.owner_id && !isMaster) {
         return interaction.reply({ content: '⛔ Apenas o dono pode gerenciar planos.', ephemeral: true });
@@ -896,7 +1042,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: ok ? `🗑️ Plano **#${prodId}** removido!` : '❌ Não encontrado.', ephemeral: true });
     }
 
-    // COMANDOS DO CLIENTE FINAL: /PAINEL, /LOJA, /MINHAS_HOSPEDAGENS, /SUPORTE
+    // COMANDOS DO CLIENTE FINAL
     if (interaction.isChatInputCommand() && interaction.commandName === 'painel') {
       const payload = await renderCustomerFixedPanel(interaction.guildId, interaction.user.id);
       const msg = await interaction.channel.send(payload);
@@ -935,32 +1081,29 @@ client.on('interactionCreate', async (interaction) => {
 
     if (interaction.isChatInputCommand() && interaction.commandName === 'suporte') {
       const cat = interaction.options.getString('categoria');
-      const channelName = `ticket-${cat}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30);
-      const ticketChannel = await interaction.guild.channels.create({
-        name: channelName,
-        type: ChannelType.GuildText,
-        permissionOverwrites: [
-          { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
-          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
-          { id: license.owner_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
-        ]
-      });
-
-      const closeRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('close_ticket').setLabel('Fechar Ticket').setStyle(ButtonStyle.Danger)
-      );
-
-      await ticketChannel.send({
-        content: `🎫 **Ticket de Atendimento (${cat.toUpperCase()})**\nCliente: <@${interaction.user.id}> • Responsável: <@${license.owner_id}>`,
-        components: [closeRow]
-      });
-      return interaction.reply({ content: `✅ Ticket aberto em <#${ticketChannel.id}>!`, ephemeral: true });
+      return openTicketChannel(interaction, cat);
     }
 
     if (interaction.isButton() && interaction.customId === 'close_ticket') {
+      const rateRow = new ActionRowBuilder().addComponents(
+        ...[1, 2, 3, 4, 5].map(n =>
+          new ButtonBuilder().setCustomId(`rate_${n}`).setLabel(`${n}★`).setStyle(ButtonStyle.Secondary)
+        )
+      );
+      await sendUserAlert(interaction.user.id, {
+        content: `⭐ **Avalie o atendimento da loja ${license.store_name}:**`,
+        components: [rateRow]
+      });
       await interaction.reply({ content: '🔒 Fechando ticket em 3 segundos...' });
       setTimeout(() => interaction.channel.delete().catch(() => {}), 3000);
       return;
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith('rate_')) {
+      const stars = Number(interaction.customId.replace('rate_', ''));
+      await db.addReview(interaction.guildId || 'global', interaction.user.id, stars);
+      await refreshAllFixedPanels();
+      return interaction.reply({ content: `✅ Obrigado pela sua avaliação de **${stars} estrela(s)**!`, ephemeral: true });
     }
 
     // BOTÕES DO PAINEL FIXO DO CLIENTE
@@ -1003,11 +1146,11 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (action === 'support') {
-        return interaction.reply({ content: '🎫 Use `/suporte` para abrir um canal privado de atendimento com a equipe!', ephemeral: true });
+        return interaction.reply({ content: '🎫 Use `/suporte` ou clique no painel de tickets para abrir atendimento!', ephemeral: true });
       }
     }
 
-    // CONTRATAÇÃO DE PLANO (VITRINE OU /LOJA) -> ABRE MODAL DE CUPOM OPCIONAL E GERA PEDIDO PIX MANUAL
+    // CONTRATAÇÃO DE PLANO
     if ((interaction.isButton() && interaction.customId.startsWith('comprar_')) || (interaction.isStringSelectMenu() && interaction.customId === 'loja_select_plan')) {
       const prodId = interaction.isButton() ? parseInt(interaction.customId.split('_')[1], 10) : parseInt(interaction.values[0], 10);
       const prod = await db.getProduct(prodId, interaction.guildId);
@@ -1035,7 +1178,6 @@ client.on('interactionCreate', async (interaction) => {
       const cupom = interaction.fields.getTextInputValue('cupom')?.trim() || null;
       const order = await db.createOrder(interaction.guildId, interaction.user.id, prod, cupom);
 
-      // Notifica o dono da loja que chegou um pedido PIX novo
       await sendUserAlert(
         license.owner_id,
         `🔔 **Novo Pedido Gerado — ${license.store_name}**\n` +
@@ -1084,4 +1226,4 @@ async function startBot() {
   await client.login(token);
 }
 
-module.exports = { startBot, client, notifyLicenseActivated, refreshAllFixedPanels };
+module.exports = { startBot, client, notifyLicenseActivated, notifyLicenseBlocked, refreshAllFixedPanels };
