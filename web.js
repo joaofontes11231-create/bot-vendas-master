@@ -27,7 +27,8 @@ app.get('/ping', (req, res) => res.status(200).send('OK'));
 app.get('/login', (req, res) => res.render('login', { error: null }));
 
 app.post('/login', (req, res) => {
-  if (req.body.password === process.env.MASTER_PASSWORD) {
+  const masterPassword = process.env.MASTER_PASSWORD?.trim();
+  if (masterPassword && req.body.password === masterPassword) {
     req.session.isMaster = true;
     return res.redirect('/');
   }
@@ -35,45 +36,83 @@ app.post('/login', (req, res) => {
 });
 
 app.get('/logout', (req, res) => {
-  req.session.destroy();
-  res.redirect('/login');
+  req.session.destroy(() => {
+    res.redirect('/login');
+  });
 });
 
 app.get('/', requireMasterAuth, async (req, res) => {
-  const licenses = await db.getAllLicenses();
-  res.render('dashboard', { licenses });
+  try {
+    const licenses = await db.getAllLicenses();
+    res.render('dashboard', { licenses });
+  } catch (err) {
+    console.error('❌ Erro ao carregar painel Master:', err);
+    res.status(500).send('Erro ao carregar licenças.');
+  }
 });
 
 app.post('/ativar', requireMasterAuth, async (req, res) => {
-  const { guild_id, owner_id, store_name, days } = req.body;
-  await db.upsertLicense(guild_id.trim(), owner_id.trim(), store_name.trim(), parseInt(days, 10));
-  res.redirect('/');
+  try {
+    const { guild_id, owner_id, store_name, days } = req.body;
+    await db.upsertLicense(
+      guild_id.trim(),
+      owner_id.trim(),
+      store_name.trim(),
+      parseInt(days, 10) || 30
+    );
+    res.redirect('/');
+  } catch (err) {
+    console.error('❌ Erro ao ativar loja:', err);
+    res.redirect('/');
+  }
 });
 
 app.post('/bloquear/:guildId', requireMasterAuth, async (req, res) => {
-  await db.setLicenseStatus(req.params.guildId, false);
-  res.redirect('/');
+  try {
+    await db.setLicenseStatus(req.params.guildId, false);
+    res.redirect('/');
+  } catch (err) {
+    console.error('❌ Erro ao bloquear loja:', err);
+    res.redirect('/');
+  }
 });
 
 app.post('/desbloquear/:guildId', requireMasterAuth, async (req, res) => {
-  await db.setLicenseStatus(req.params.guildId, true);
-  res.redirect('/');
+  try {
+    await db.setLicenseStatus(req.params.guildId, true);
+    res.redirect('/');
+  } catch (err) {
+    console.error('❌ Erro ao desbloquear loja:', err);
+    res.redirect('/');
+  }
 });
 
 app.post('/renovar/:guildId', requireMasterAuth, async (req, res) => {
-  const days = parseInt(req.body.extra_days, 10) || 30;
-  await db.addDays(req.params.guildId, days);
-  res.redirect('/');
+  try {
+    const days = parseInt(req.body.extra_days, 10) || 30;
+    await db.addDays(req.params.guildId, days);
+    res.redirect('/');
+  } catch (err) {
+    console.error('❌ Erro ao renovar loja:', err);
+    res.redirect('/');
+  }
 });
 
 app.post('/remover/:guildId', requireMasterAuth, async (req, res) => {
-  await db.deleteLicense(req.params.guildId);
-  res.redirect('/');
+  try {
+    await db.deleteLicense(req.params.guildId);
+    res.redirect('/');
+  } catch (err) {
+    console.error('❌ Erro ao remover loja:', err);
+    res.redirect('/');
+  }
 });
 
 module.exports = {
   startWeb: () => {
     const port = process.env.PORT || 3000;
-    app.listen(port, () => console.log(`🌐 Painel Master online na porta ${port}`));
+    app.listen(port, '0.0.0.0', () => {
+      console.log(`🌐 Painel Master online na porta ${port}`);
+    });
   }
 };
