@@ -33,18 +33,151 @@ function groupByOwner(licenses) {
       map.set(ownerId, {
         owner_id: ownerId,
         stores: [],
-        activeStores: 0,
-        totalDaysRemaining: 0
+        activeStores: 0
       });
     }
     const group = map.get(ownerId);
     group.stores.push(lic);
     if (lic.isOperational) group.activeStores += 1;
-    group.totalDaysRemaining += Number(lic.daysLeft || 0);
   }
 
   return Array.from(map.values());
 }
+
+const BASE_STYLES = `
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    min-height: 100vh;
+    background: #0f172a;
+    color: #f8fafc;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.45;
+    overflow-x: hidden;
+  }
+  .page {
+    width: 100%;
+    min-height: 100vh;
+    padding: 16px;
+  }
+  @media (min-width: 768px) {
+    .page { padding: 28px 36px; }
+  }
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid #1e293b;
+  }
+  h1 { margin: 0; font-size: 22px; }
+  h2 { margin: 0 0 12px 0; font-size: 18px; }
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 18px;
+    width: 100%;
+  }
+  @media (min-width: 960px) {
+    .layout { grid-template-columns: 380px 1fr; }
+  }
+  .card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 14px;
+    padding: 18px;
+    width: 100%;
+  }
+  label {
+    display: block;
+    font-size: 14px;
+    font-weight: 600;
+    color: #cbd5e1;
+    margin-bottom: 6px;
+  }
+  input, select {
+    width: 100%;
+    padding: 12px;
+    font-size: 16px;
+    border-radius: 10px;
+    border: 1px solid #475569;
+    background: #0f172a;
+    color: #fff;
+    margin-bottom: 14px;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    padding: 11px 16px;
+    font-size: 15px;
+    font-weight: 700;
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    text-decoration: none;
+    color: #fff;
+    background: #2563eb;
+  }
+  .btn:active { transform: scale(0.99); }
+  .btn-success { background: #16a34a; }
+  .btn-danger { background: #dc2626; }
+  .btn-secondary { background: #334155; }
+  .btn-block { width: 100%; }
+  .actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .item-box {
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 14px;
+    margin-bottom: 12px;
+    word-break: break-word;
+  }
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+  }
+  .badge-on { background: rgba(22, 163, 74, .2); color: #4ade80; }
+  .badge-off { background: rgba(239, 68, 68, .2); color: #f87171; }
+  .muted { color: #94a3b8; font-size: 14px; }
+  code {
+    background: #1e293b;
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  #toast {
+    position: fixed;
+    bottom: 18px;
+    right: 18px;
+    left: 18px;
+    max-width: 420px;
+    margin-left: auto;
+    background: #16a34a;
+    color: #fff;
+    padding: 12px 16px;
+    border-radius: 10px;
+    font-weight: 700;
+    display: none;
+    z-index: 99;
+    box-shadow: 0 8px 20px rgba(0,0,0,.4);
+  }
+`;
 
 app.get('/login', (req, res) => {
   if (req.session && req.session.authenticated) {
@@ -55,27 +188,26 @@ app.get('/login', (req, res) => {
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
   <title>Login — Painel Master</title>
   <style>
-    body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-    .card { background: #1e293b; padding: 28px; border-radius: 12px; width: 100%; max-width: 360px; box-shadow: 0 10px 25px rgba(0,0,0,.35); }
-    h2 { margin-top: 0; font-size: 20px; }
-    input { width: 100%; padding: 10px; margin: 10px 0 16px; border-radius: 8px; border: 1px solid #334155; background: #0f172a; color: #fff; box-sizing: border-box; }
-    button { width: 100%; padding: 11px; border: none; border-radius: 8px; background: #2563eb; color: #fff; font-weight: bold; cursor: pointer; }
-    button:hover { background: #1d4ed8; }
-    .err { color: #f87171; font-size: 13px; margin-bottom: 10px; }
+    ${BASE_STYLES}
+    .center-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; }
+    .login-card { width: 100%; max-width: 400px; }
+    .err { color: #f87171; font-size: 14px; margin-bottom: 12px; }
   </style>
 </head>
 <body>
-  <div class="card">
-    <h2>Painel Master</h2>
-    ${req.query.error ? '<div class="err">Senha incorreta.</div>' : ''}
-    <form method="POST" action="/login">
-      <label>Senha Master</label>
-      <input type="password" name="password" required autofocus />
-      <button type="submit">Entrar</button>
-    </form>
+  <div class="center-wrap">
+    <div class="card login-card">
+      <h2>Painel Master</h2>
+      ${req.query.error ? '<div class="err">Senha incorreta.</div>' : ''}
+      <form method="POST" action="/login">
+        <label>Senha Master</label>
+        <input type="password" name="password" required autofocus />
+        <button class="btn btn-block" type="submit">Entrar</button>
+      </form>
+    </div>
   </div>
 </body>
 </html>`);
@@ -106,6 +238,17 @@ app.get('/api/state', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('Erro ao buscar estado:', err);
     res.status(500).json({ ok: false, error: 'Erro ao carregar dados do banco.' });
+  }
+});
+
+app.get('/api/clients/:ownerId', requireAuth, async (req, res) => {
+  try {
+    const ownerId = String(req.params.ownerId).trim();
+    const history = await db.getClientFullHistory(ownerId);
+    res.json({ ok: true, owner_id: ownerId, stores: history });
+  } catch (err) {
+    console.error('Erro ao carregar ficha do cliente:', err);
+    res.status(500).json({ ok: false, error: 'Erro ao carregar histórico completo.' });
   }
 });
 
@@ -157,54 +300,54 @@ app.patch('/api/licenses/:guildId', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/', requireAuth, async (req, res) => {
+app.delete('/api/licenses/:guildId', requireAuth, async (req, res) => {
+  try {
+    const ok = await db.deleteLicense(req.params.guildId);
+    if (!ok) return res.status(404).json({ ok: false, error: 'Loja não encontrada.' });
+    const allLicenses = await db.getAllLicenses();
+    return res.json({ ok: true, clients: groupByOwner(allLicenses) });
+  } catch (err) {
+    console.error('Erro ao remover loja:', err);
+    return res.status(500).json({ ok: false, error: 'Falha ao remover loja.' });
+  }
+});
+
+app.delete('/api/clients/:ownerId', requireAuth, async (req, res) => {
+  try {
+    const count = await db.deleteOwnerAndStores(req.params.ownerId);
+    if (!count) return res.status(404).json({ ok: false, error: 'Cliente não encontrado.' });
+    const allLicenses = await db.getAllLicenses();
+    return res.json({ ok: true, removedStores: count, clients: groupByOwner(allLicenses) });
+  } catch (err) {
+    console.error('Erro ao remover cliente:', err);
+    return res.status(500).json({ ok: false, error: 'Falha ao remover cliente.' });
+  }
+});
+
+// PÁGINA PRINCIPAL (TELA CHEIA RESPONSIVA)
+app.get('/', requireAuth, (req, res) => {
   res.send(`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Painel Master — Clientes e Lojas</title>
-  <style>
-    * { box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 24px; }
-    .container { max-width: 1120px; margin: 0 auto; }
-    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; gap: 12px; flex-wrap: wrap; }
-    h1 { margin: 0; font-size: 22px; }
-    .grid-2 { display: grid; grid-template-columns: 1fr 1.4fr; gap: 20px; }
-    @media (max-width: 860px) { .grid-2 { grid-template-columns: 1fr; } }
-    .panel { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
-    .panel h2 { margin-top: 0; font-size: 17px; margin-bottom: 14px; }
-    label { display: block; font-size: 13px; color: #cbd5e1; margin-bottom: 4px; }
-    input, select { width: 100%; padding: 9px 10px; margin-bottom: 12px; border-radius: 8px; border: 1px solid #475569; background: #0f172a; color: #fff; }
-    button { padding: 9px 14px; border-radius: 8px; border: none; font-weight: bold; cursor: pointer; background: #2563eb; color: #fff; }
-    button:hover { opacity: 0.92; }
-    button.secondary { background: #334155; }
-    button.success { background: #16a34a; }
-    .client-card { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 14px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .store-item { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 14px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
-    .badge { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: bold; }
-    .badge.on { background: rgba(22, 163, 74, .2); color: #4ade80; }
-    .badge.off { background: rgba(239, 68, 68, .2); color: #f87171; }
-    .muted { color: #94a3b8; font-size: 13px; }
-    .modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.65); display: none; justify-content: center; align-items: center; padding: 16px; z-index: 50; }
-    .modal-backdrop.open { display: flex; }
-    .modal { background: #1e293b; border: 1px solid #475569; border-radius: 12px; padding: 22px; width: 100%; max-width: 440px; }
-    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }
-    #toast { position: fixed; bottom: 20px; right: 20px; background: #16a34a; color: #fff; padding: 10px 16px; border-radius: 8px; font-weight: bold; display: none; z-index: 60; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
+  <title>Painel Master — Clientes & Lojas</title>
+  <style>${BASE_STYLES}</style>
 </head>
 <body>
-  <div class="container">
+  <div class="page">
     <header>
       <div>
-        <h1>Painel Master — Clientes & Lojas</h1>
-        <div class="muted">Cada cliente pode ter várias lojas. Abra o perfil para ver todas e editar na hora.</div>
+        <h1>Painel Master</h1>
+        <div class="muted">Gerencie clientes, lojas e abra a ficha completa em nova aba.</div>
       </div>
-      <form method="POST" action="/logout"><button class="secondary" type="submit">Sair</button></form>
+      <form method="POST" action="/logout">
+        <button class="btn btn-secondary" type="submit">Sair</button>
+      </form>
     </header>
 
-    <div class="grid-2">
-      <div class="panel">
+    <div class="layout">
+      <div class="card">
         <h2>Ativar / Adicionar Loja</h2>
         <form id="createForm">
           <label>ID do Dono (Cliente no Discord)</label>
@@ -219,57 +362,14 @@ app.get('/', requireAuth, async (req, res) => {
           <label>Dias de Aluguel</label>
           <input type="number" name="days" min="1" value="30" required />
 
-          <button class="success" type="submit" style="width:100%;">Ativar Loja e Notificar</button>
+          <button class="btn btn-success btn-block" type="submit">Ativar Loja e Notificar</button>
         </form>
       </div>
 
-      <div class="panel" id="rightPanel">
-        <div id="clientsView">
-          <h2>Clientes Cadastrados</h2>
-          <div id="clientsList"><div class="muted">Carregando...</div></div>
-        </div>
-
-        <div id="profileView" style="display:none;">
-          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; gap:10px;">
-            <div>
-              <h2 style="margin:0;">Perfil do Cliente</h2>
-              <div class="muted" id="profileOwnerId"></div>
-            </div>
-            <button class="secondary" type="button" onclick="backToClients()">Voltar aos Clientes</button>
-          </div>
-          <div id="profileSummary" style="margin-bottom:14px;"></div>
-          <div id="profileStores"></div>
-        </div>
+      <div class="card">
+        <h2>Clientes Cadastrados (<span id="clientCount">0</span>)</h2>
+        <div id="clientsList"><div class="muted">Carregando clientes...</div></div>
       </div>
-    </div>
-  </div>
-
-  <div class="modal-backdrop" id="editModal">
-    <div class="modal">
-      <h2 style="margin-top:0;">Editar Informações da Loja / Cliente</h2>
-      <form id="editForm">
-        <input type="hidden" name="original_guild_id" id="editOriginalGuildId" />
-
-        <label>ID do Dono (Cliente)</label>
-        <input type="text" name="owner_id" id="editOwnerId" required />
-
-        <label>Nome da Loja</label>
-        <input type="text" name="store_name" id="editStoreName" required />
-
-        <label>Definir Dias Restantes a partir de hoje</label>
-        <input type="number" name="days" id="editDays" min="0" required />
-
-        <label>Status do Robô</label>
-        <select name="active" id="editActive">
-          <option value="true">Ativo (Ligado)</option>
-          <option value="false">Bloqueado (Desligado)</option>
-        </select>
-
-        <div class="modal-actions">
-          <button type="button" class="secondary" onclick="closeEditModal()">Cancelar</button>
-          <button type="submit" class="success">Salvar e Atualizar</button>
-        </div>
-      </form>
     </div>
   </div>
 
@@ -277,7 +377,6 @@ app.get('/', requireAuth, async (req, res) => {
 
   <script>
     let state = { clients: [], licenses: [] };
-    let selectedOwnerId = null;
 
     function showToast(msg, isError = false) {
       const el = document.getElementById('toast');
@@ -285,7 +384,7 @@ app.get('/', requireAuth, async (req, res) => {
       el.style.background = isError ? '#dc2626' : '#16a34a';
       el.style.display = 'block';
       clearTimeout(window._toastTimer);
-      window._toastTimer = setTimeout(() => { el.style.display = 'none'; }, 2800);
+      window._toastTimer = setTimeout(() => { el.style.display = 'none'; }, 3000);
     }
 
     async function loadState() {
@@ -293,90 +392,54 @@ app.get('/', requireAuth, async (req, res) => {
       const data = await res.json();
       if (data.ok) {
         state = data;
-        renderAll();
+        renderClients();
       }
     }
 
-    function renderAll() {
+    function renderClients() {
       const listEl = document.getElementById('clientsList');
+      document.getElementById('clientCount').textContent = state.clients.length;
+
       if (!state.clients.length) {
         listEl.innerHTML = '<div class="muted">Nenhum cliente cadastrado ainda.</div>';
-      } else {
-        listEl.innerHTML = state.clients.map(c => \`
-          <div class="client-card">
-            <div>
-              <div><strong>Cliente ID:</strong> <code>\${c.owner_id}</code></div>
-              <div class="muted">Lojas: <strong>\${c.stores.length}</strong> • Ativas: <strong>\${c.activeStores}</strong></div>
-            </div>
-            <button type="button" onclick="openProfile('\${c.owner_id}')">Perfil dele</button>
-          </div>
-        \`).join('');
-      }
-
-      if (selectedOwnerId) {
-        renderProfile(selectedOwnerId);
-      }
-    }
-
-    function openProfile(ownerId) {
-      selectedOwnerId = ownerId;
-      document.getElementById('clientsView').style.display = 'none';
-      document.getElementById('profileView').style.display = 'block';
-      renderProfile(ownerId);
-    }
-
-    function backToClients() {
-      selectedOwnerId = null;
-      document.getElementById('profileView').style.display = 'none';
-      document.getElementById('clientsView').style.display = 'block';
-    }
-
-    function renderProfile(ownerId) {
-      const client = state.clients.find(c => c.owner_id === ownerId);
-      document.getElementById('profileOwnerId').textContent = 'ID Discord: ' + ownerId;
-
-      if (!client || !client.stores.length) {
-        document.getElementById('profileSummary').innerHTML = '';
-        document.getElementById('profileStores').innerHTML = '<div class="muted">Nenhuma loja vinculada a este cliente.</div>';
         return;
       }
 
-      document.getElementById('profileSummary').innerHTML =
-        '<div class="muted">Total de lojas criadas: <strong>' + client.stores.length + '</strong> • Lojas ativas: <strong>' + client.activeStores + '</strong></div>';
+      listEl.innerHTML = state.clients.map(c => {
+        const storeBadges = c.stores.map(s =>
+          \`<span class="badge \${s.isOperational ? 'badge-on' : 'badge-off'}" style="margin-right:6px; margin-top:4px;">\${escapeHtml(s.store_name)} (\${s.daysLeft}d)</span>\`
+        ).join('');
 
-      document.getElementById('profileStores').innerHTML = client.stores.map(s => \`
-        <div class="store-item">
-          <div>
-            <div>
-              <strong>\${escapeHtml(s.store_name)}</strong>
-              <span class="badge \${s.isOperational ? 'on' : 'off'}">\${s.isOperational ? 'Ativo' : 'Bloqueado/Vencido'}</span>
+        return \`
+          <div class="item-box">
+            <div><strong>Cliente ID:</strong> <code>\${c.owner_id}</code></div>
+            <div class="muted" style="margin-top:4px;">Total de lojas: <strong>\${c.stores.length}</strong> • Ativas: <strong>\${c.activeStores}</strong></div>
+            <div style="margin-top:6px;">\${storeBadges}</div>
+            <div class="actions">
+              <a class="btn" href="/cliente/\${encodeURIComponent(c.owner_id)}" target="_blank" rel="noopener">Editar / Ver Tudo (Nova Aba)</a>
+              <button class="btn btn-danger" type="button" onclick="removeClient('\${c.owner_id}')">Remover Cliente</button>
             </div>
-            <div class="muted">Servidor: <code>\${s.guild_id}</code> • Restam: <strong>\${s.daysLeft} dia(s)</strong> • PIX: \${s.mp_token ? 'Sim' : 'Não'}</div>
           </div>
-          <button type="button" onclick="openEditModal('\${s.guild_id}')">Editar</button>
-        </div>
-      \`).join('');
+        \`;
+      }).join('');
     }
 
-    function openEditModal(guildId) {
-      const lic = state.licenses.find(l => l.guild_id === guildId);
-      if (!lic) return;
-      document.getElementById('editOriginalGuildId').value = lic.guild_id;
-      document.getElementById('editOwnerId').value = lic.owner_id;
-      document.getElementById('editStoreName').value = lic.store_name;
-      document.getElementById('editDays').value = lic.daysLeft;
-      document.getElementById('editActive').value = lic.active ? 'true' : 'false';
-      document.getElementById('editModal').classList.add('open');
-    }
-
-    function closeEditModal() {
-      document.getElementById('editModal').classList.remove('open');
+    async function removeClient(ownerId) {
+      if (!confirm('Remover este cliente e TODAS as lojas/produtos dele da lista?')) return;
+      const res = await fetch('/api/clients/' + encodeURIComponent(ownerId), { method: 'DELETE' });
+      const data = await res.json();
+      if (data.ok) {
+        state.clients = data.clients;
+        renderClients();
+        showToast('Cliente removido da lista!');
+      } else {
+        showToast(data.error || 'Erro ao remover cliente', true);
+      }
     }
 
     document.getElementById('createForm').addEventListener('submit', async (e) => {
       e.preventDefault();
-      const formData = new FormData(e.target);
-      const payload = Object.fromEntries(formData.entries());
+      const payload = Object.fromEntries(new FormData(e.target).entries());
 
       const res = await fetch('/api/licenses', {
         method: 'POST',
@@ -385,25 +448,160 @@ app.get('/', requireAuth, async (req, res) => {
       });
       const data = await res.json();
       if (data.ok) {
-        state.licenses = data.license ? upsertLocalLicense(state.licenses, data.license) : state.licenses;
         state.clients = data.clients;
         e.target.reset();
         e.target.days.value = 30;
-        renderAll();
+        renderClients();
         showToast('Loja ativada e avisos enviados!');
       } else {
         showToast(data.error || 'Erro ao ativar loja', true);
       }
     });
 
-    document.getElementById('editForm').addEventListener('submit', async (e) => {
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, (m) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[m]));
+    }
+
+    loadState();
+  </script>
+</body>
+</html>`);
+});
+
+// NOVA ABA DO CLIENTE COM TUDO QUE ELE FEZ + EDIÇÃO INSTANTÂNEA + REMOÇÃO
+app.get('/cliente/:ownerId', requireAuth, (req, res) => {
+  const ownerId = String(req.params.ownerId).trim();
+
+  res.send(`<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0" />
+  <title>Ficha do Cliente — ${ownerId}</title>
+  <style>${BASE_STYLES}</style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <div>
+        <h1>Ficha Completa do Cliente</h1>
+        <div class="muted">ID Discord: <code>${ownerId}</code></div>
+      </div>
+      <div class="actions" style="margin-top:0;">
+        <button class="btn btn-danger" type="button" onclick="deleteEntireClient()">Remover Cliente da Lista</button>
+        <button class="btn btn-secondary" type="button" onclick="window.close()">Fechar Aba</button>
+      </div>
+    </header>
+
+    <div id="content"><div class="muted">Carregando tudo que o cliente criou...</div></div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    const OWNER_ID = ${JSON.stringify(ownerId)};
+
+    function showToast(msg, isError = false) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.style.background = isError ? '#dc2626' : '#16a34a';
+      el.style.display = 'block';
+      clearTimeout(window._toastTimer);
+      window._toastTimer = setTimeout(() => { el.style.display = 'none'; }, 3000);
+    }
+
+    async function loadClientData() {
+      const res = await fetch('/api/clients/' + encodeURIComponent(OWNER_ID));
+      const data = await res.json();
+      const container = document.getElementById('content');
+
+      if (!data.ok || !data.stores.length) {
+        container.innerHTML = '<div class="card"><div class="muted">Nenhuma loja ou atividade encontrada para este cliente.</div></div>';
+        return;
+      }
+
+      const totalProducts = data.stores.reduce((acc, s) => acc + s.products.length, 0);
+      const totalStock = data.stores.reduce((acc, s) => acc + s.products.reduce((a, p) => a + p.stockCount, 0), 0);
+
+      let html = \`
+        <div class="card" style="margin-bottom:18px;">
+          <h2>Resumo Geral do Cliente</h2>
+          <div class="muted">
+            • <strong>Lojas criadas:</strong> \${data.stores.length}<br/>
+            • <strong>Total de produtos cadastrados:</strong> \${totalProducts}<br/>
+            • <strong>Total de itens em estoque:</strong> \${totalStock}
+          </div>
+        </div>
+      \`;
+
+      html += data.stores.map(store => {
+        const productsHtml = store.products.length
+          ? store.products.map(p => \`
+              <div class="item-box" style="margin-bottom:8px;">
+                <div><strong>Produto ID #\${p.id}</strong> — \${escapeHtml(p.name)}</div>
+                <div class="muted">Preço: <strong>R$ \${Number(p.price).toFixed(2)}</strong> • Estoque: <strong>\${p.stockCount}</strong></div>
+                <div class="muted">\${escapeHtml(p.description)}</div>
+              </div>
+            \`).join('')
+          : '<div class="muted">Nenhum produto criado nesta loja ainda.</div>';
+
+        return \`
+          <div class="card" style="margin-bottom:18px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:12px;">
+              <div>
+                <h2 style="margin:0;">Loja: \${escapeHtml(store.store_name)}</h2>
+                <div class="muted">Servidor ID: <code>\${store.guild_id}</code></div>
+              </div>
+              <span class="badge \${store.isOperational ? 'badge-on' : 'badge-off'}">\${store.isOperational ? 'Ativo (' + store.daysLeft + 'd)' : 'Bloqueado / Vencido'}</span>
+            </div>
+
+            <div class="muted" style="margin-bottom:14px;">
+              • <strong>PIX Mercado Pago:</strong> \${store.mp_token ? '✅ Configurado' : '❌ Não configurado'}<br/>
+              • <strong>Foto exclusiva do servidor:</strong> \${store.store_photo ? '<a href="' + escapeHtml(store.store_photo) + '" target="_blank" style="color:#60a5fa;">Ver imagem configurada</a>' : 'Não definida'}
+            </div>
+
+            <form onsubmit="saveStore(event, '\${store.guild_id}')">
+              <label>ID do Dono (Transferir / Editar)</label>
+              <input type="text" name="owner_id" value="\${escapeHtml(store.owner_id)}" required />
+
+              <label>Nome da Loja</label>
+              <input type="text" name="store_name" value="\${escapeHtml(store.store_name)}" required />
+
+              <label>Dias Restantes a partir de hoje</label>
+              <input type="number" name="days" min="0" value="\${store.daysLeft}" required />
+
+              <label>Status do Robô</label>
+              <select name="active">
+                <option value="true" \${store.active ? 'selected' : ''}>Ativo (Ligado)</option>
+                <option value="false" \${!store.active ? 'selected' : ''}>Bloqueado (Desligado)</option>
+              </select>
+
+              <div class="actions">
+                <button class="btn btn-success" type="submit">Salvar Alterações Agora</button>
+                <button class="btn btn-danger" type="button" onclick="removeStore('\${store.guild_id}')">Remover Esta Loja</button>
+              </div>
+            </form>
+
+            <hr style="border:0; border-top:1px solid #334155; margin:18px 0;" />
+            <h2>Produtos Criados Nesta Loja (\${store.products.length})</h2>
+            \${productsHtml}
+          </div>
+        \`;
+      }).join('');
+
+      container.innerHTML = html;
+    }
+
+    async function saveStore(e, guildId) {
       e.preventDefault();
-      const guildId = document.getElementById('editOriginalGuildId').value;
+      const form = e.target;
       const payload = {
-        owner_id: document.getElementById('editOwnerId').value.trim(),
-        store_name: document.getElementById('editStoreName').value.trim(),
-        days: Number(document.getElementById('editDays').value),
-        active: document.getElementById('editActive').value === 'true'
+        owner_id: form.owner_id.value.trim(),
+        store_name: form.store_name.value.trim(),
+        days: Number(form.days.value),
+        active: form.active.value === 'true'
       };
 
       const res = await fetch('/api/licenses/' + encodeURIComponent(guildId), {
@@ -413,27 +611,35 @@ app.get('/', requireAuth, async (req, res) => {
       });
       const data = await res.json();
       if (data.ok) {
-        state.licenses = upsertLocalLicense(state.licenses, data.license);
-        state.clients = data.clients;
-        if (selectedOwnerId && selectedOwnerId !== data.license.owner_id) {
-          selectedOwnerId = data.license.owner_id;
-        }
-        closeEditModal();
-        renderAll();
-        showToast('Informações atualizadas instantaneamente!');
+        showToast('Alterações salvas instantaneamente!');
+        loadClientData();
       } else {
-        showToast(data.error || 'Erro ao atualizar', true);
+        showToast(data.error || 'Erro ao salvar', true);
       }
-    });
+    }
 
-    function upsertLocalLicense(list, item) {
-      const idx = list.findIndex(x => x.guild_id === item.guild_id);
-      if (idx >= 0) {
-        const copy = [...list];
-        copy[idx] = item;
-        return copy;
+    async function removeStore(guildId) {
+      if (!confirm('Remover esta loja e todos os produtos dela?')) return;
+      const res = await fetch('/api/licenses/' + encodeURIComponent(guildId), { method: 'DELETE' });
+      const data = await res.json();
+      if (data.ok) {
+        showToast('Loja removida!');
+        loadClientData();
+      } else {
+        showToast(data.error || 'Erro ao remover loja', true);
       }
-      return [item, ...list];
+    }
+
+    async function deleteEntireClient() {
+      if (!confirm('Remover este cliente e TODAS as lojas dele da lista?')) return;
+      const res = await fetch('/api/clients/' + encodeURIComponent(OWNER_ID), { method: 'DELETE' });
+      const data = await res.json();
+      if (data.ok) {
+        showToast('Cliente removido com sucesso!');
+        setTimeout(() => { window.location.href = '/'; }, 900);
+      } else {
+        showToast(data.error || 'Erro ao remover cliente', true);
+      }
     }
 
     function escapeHtml(str) {
@@ -442,7 +648,7 @@ app.get('/', requireAuth, async (req, res) => {
       }[m]));
     }
 
-    loadState();
+    loadClientData();
   </script>
 </body>
 </html>`);
