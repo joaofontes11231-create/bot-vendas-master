@@ -14,27 +14,36 @@ const {
 const { MercadoPagoConfig, Payment } = require('mercadopago');
 const db = require('./database');
 
+const LOCKED_MESSAGE =
+  `Robô de vendas automáticas adicionado no servidor.\n` +
+  `-  Estado do Robô: Desligado.\n` +
+  `*Para ativar o sistema do robô de vendas automáticas acesse: https://discord.gg/ZQzv7U3Vnw e entre em contato para ativar.`;
+
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages]
+});
+
+client.on('error', (err) => {
+  console.error('❌ Erro no client do Discord:', err);
+});
+
+client.on('warn', (info) => {
+  console.warn('⚠️ Aviso do client do Discord:', info);
 });
 
 client.on('guildCreate', async (guild) => {
   try {
     let targetChannel = guild.systemChannel;
-    if (!targetChannel || !targetChannel.permissionsFor(guild.members.me).has(PermissionFlagsBits.SendMessages)) {
+    if (!targetChannel || !targetChannel.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.SendMessages)) {
       targetChannel = guild.channels.cache.find(
-        c => c.type === ChannelType.GuildText && c.permissionsFor(guild.members.me).has(PermissionFlagsBits.SendMessages)
+        c => c.type === ChannelType.GuildText && c.permissionsFor(guild.members.me)?.has(PermissionFlagsBits.SendMessages)
       );
     }
     if (targetChannel) {
-      await targetChannel.send(
-        `Robô de vendas automáticas adicionado no servidor.\n` +
-        `-  Estado do Robô: Desligado.\n` +
-        `*Para ativar o sistema do robô de vendas automáticas acesse: https://discord.gg/ZQzv7U3Vnw e entre em contato para ativar.`
-      );
+      await targetChannel.send(LOCKED_MESSAGE);
     }
   } catch (err) {
-    console.error('Erro ao enviar boas-vindas:', err);
+    console.error('❌ Erro ao enviar mensagem inicial no servidor:', err);
   }
 });
 
@@ -97,221 +106,265 @@ const commands = [
     )
 ].map(cmd => cmd.toJSON());
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+
+  const token = process.env.DISCORD_TOKEN?.trim();
+  const clientId = process.env.CLIENT_ID?.trim();
+
+  if (!token || !clientId) {
+    console.warn('⚠️ DISCORD_TOKEN ou CLIENT_ID ausente ao registrar comandos.');
+    return;
+  }
+
+  const rest = new REST({ version: '10' }).setToken(token);
   try {
-    await rest.put(Routes.applicationCommands(process.env.CLIENT_ID), { body: commands });
+    await rest.put(Routes.applicationCommands(clientId), { body: commands });
     console.log('✅ Comandos registrados.');
   } catch (e) {
-    console.error('Erro ao registrar comandos:', e);
+    console.error('❌ Erro ao registrar comandos:', e);
   }
 });
 
 client.on('interactionCreate', async (interaction) => {
-  if (interaction.isChatInputCommand() && interaction.commandName === 'master') {
-    if (interaction.user.id !== process.env.MASTER_ID) {
-      return interaction.reply({ content: '⛔ Acesso negado. Comando exclusivo do administrador Master.', ephemeral: true });
-    }
-
-    const sub = interaction.options.getSubcommand();
-    const guildId = interaction.options.getString('id_servidor');
-
-    if (sub === 'ativar') {
-      const ownerId = interaction.options.getString('id_dono');
-      const storeName = interaction.options.getString('nome_loja');
-      const days = interaction.options.getInteger('dias');
-      await db.upsertLicense(guildId, ownerId, storeName, days);
-      return interaction.reply({ content: `✅ Loja **${storeName}** (\`${guildId}\`) ativada para <@${ownerId}> por **${days} dias**.`, ephemeral: true });
-    }
-
-    if (sub === 'bloquear') {
-      await db.setLicenseStatus(guildId, false);
-      return interaction.reply({ content: `🔒 Servidor \`${guildId}\` **BLOQUEADO** com sucesso.`, ephemeral: true });
-    }
-
-    if (sub === 'desbloquear') {
-      await db.setLicenseStatus(guildId, true);
-      return interaction.reply({ content: `🔓 Servidor \`${guildId}\` **DESBLOQUEADO** com sucesso.`, ephemeral: true });
-    }
-
-    if (sub === 'status') {
-      const lic = await db.getLicense(guildId);
-      if (!lic) return interaction.reply({ content: '❌ Servidor não cadastrado.', ephemeral: true });
-      return interaction.reply({
-        content: `📊 **Loja:** ${lic.store_name}\n👤 **Dono:** <@${lic.owner_id}>\n⚡ **Status:** ${lic.active && !lic.isExpired ? 'Ativo' : 'Bloqueado/Vencido'}\n⏳ **Dias restantes:** ${lic.daysLeft} dias`,
-        ephemeral: true
-      });
-    }
-  }
-
-  if (!interaction.guildId) return;
-  const license = await db.getLicense(interaction.guildId);
-
-  if (!license || !license.active || license.isExpired) {
-    if (interaction.isRepliable()) {
-      return interaction.reply({
-        content:
-          `Robô de vendas automáticas adicionado no servidor.\n` +
-          `-  Estado do Robô: Desligado.\n` +
-          `*Para ativar o sistema do robô de vendas automáticas acesse: https://discord.gg/ZQzv7U3Vnw e entre em contato para ativar.`,
-        ephemeral: true
-      });
-    }
-    return;
-  }
-
-  if (interaction.isChatInputCommand() && interaction.commandName === 'painel_dono') {
-    if (interaction.user.id !== license.owner_id) {
-      return interaction.reply({ content: '⛔ Apenas o Dono registrado desta loja pode usar este painel.', ephemeral: true });
-    }
-
-    const sub = interaction.options.getSubcommand();
-
-    if (sub === 'aluguel') {
-      return interaction.reply({
-        content: `🏪 **Loja:** ${license.store_name}\n⏳ **Tempo restante de aluguel:** **${license.daysLeft} dia(s)**.\nPara renovar, entre em contato em: https://discord.gg/ZQzv7U3Vnw`,
-        ephemeral: true
-      });
-    }
-
-    if (sub === 'config_pix') {
-      const token = interaction.options.getString('access_token');
-      await db.setMpToken(interaction.guildId, token);
-      return interaction.reply({ content: '✅ Token do Mercado Pago salvo com segurança!', ephemeral: true });
-    }
-
-    if (sub === 'criar_produto') {
-      const nome = interaction.options.getString('nome');
-      const preco = interaction.options.getNumber('preco');
-      const desc = interaction.options.getString('descricao');
-      const info = await db.addProduct(interaction.guildId, nome, desc, preco);
-      return interaction.reply({ content: `✅ Produto **${nome}** criado com ID **#${info.lastInsertRowid}** (R$ ${preco.toFixed(2)}).`, ephemeral: true });
-    }
-
-    if (sub === 'add_estoque') {
-      const prodId = interaction.options.getInteger('id_produto');
-      const rawItems = interaction.options.getString('itens').split(',').map(i => i.trim()).filter(Boolean);
-      const total = await db.addStock(prodId, interaction.guildId, rawItems);
-      if (total === false) return interaction.reply({ content: '❌ Produto não encontrado.', ephemeral: true });
-      return interaction.reply({ content: `📦 Estoque atualizado! Total disponível agora: **${total} unidade(s)**.`, ephemeral: true });
-    }
-
-    if (sub === 'enviar_vitrine') {
-      const prodId = interaction.options.getInteger('id_produto');
-      const prod = await db.getProduct(prodId, interaction.guildId);
-      if (!prod) return interaction.reply({ content: '❌ Produto não encontrado.', ephemeral: true });
-
-      const stockCount = JSON.parse(prod.stock || '[]').length;
-      const embed = new EmbedBuilder()
-        .setTitle(`🛒 ${license.store_name} — ${prod.name}`)
-        .setDescription(prod.description)
-        .addFields(
-          { name: '💵 Valor', value: `R$ ${Number(prod.price).toFixed(2)}`, inline: true },
-          { name: '📦 Estoque', value: `${stockCount} disponíveis`, inline: true }
-        )
-        .setColor('#2ecc71')
-        .setFooter({ text: 'Entrega automática 24h após confirmação do PIX' });
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`comprar_${prod.id}`)
-          .setLabel('Comprar via PIX')
-          .setStyle(ButtonStyle.Success)
-      );
-
-      await interaction.channel.send({ embeds: [embed], components: [row] });
-      return interaction.reply({ content: '✅ Vitrine enviada no canal!', ephemeral: true });
-    }
-  }
-
-  if (interaction.isButton() && interaction.customId.startsWith('comprar_')) {
-    const prodId = parseInt(interaction.customId.split('_')[1], 10);
-    const prod = await db.getProduct(prodId, interaction.guildId);
-
-    if (!prod) return interaction.reply({ content: '❌ Produto indisponível.', ephemeral: true });
-    const stockArray = JSON.parse(prod.stock || '[]');
-    if (stockArray.length === 0) return interaction.reply({ content: '❌ Produto sem estoque no momento.', ephemeral: true });
-    if (!license.mp_token) return interaction.reply({ content: '⚠️ O dono desta loja ainda não configurou o recebimento PIX.', ephemeral: true });
-
-    await interaction.deferReply({ ephemeral: true });
-
-    try {
-      const mpClient = new MercadoPagoConfig({ accessToken: license.mp_token });
-      const payment = new Payment(mpClient);
-
-      const res = await payment.create({
-        body: {
-          transaction_amount: Number(prod.price),
-          description: `${license.store_name} - ${prod.name}`,
-          payment_method_id: 'pix',
-          payer: { email: `cliente_${interaction.user.id}@vendasbot.com` }
-        }
-      });
-
-      const pixCopiaECola = res.point_of_interaction.transaction_data.qr_code;
-      const paymentId = res.id;
-
-      const payEmbed = new EmbedBuilder()
-        .setTitle(`💠 Pagamento PIX — ${prod.name}`)
-        .setDescription(
-          `Valor: **R$ ${Number(prod.price).toFixed(2)}**\n\n` +
-          `**Código PIX Copia e Cola:**\n\`\`\`${pixCopiaECola}\`\`\`\n` +
-          `Após pagar, clique em **Verificar Pagamento** abaixo.`
-        )
-        .setColor('#00b0f4');
-
-      const checkRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`verificar_${paymentId}_${prod.id}`)
-          .setLabel('Verificar Pagamento')
-          .setStyle(ButtonStyle.Primary)
-      );
-
-      await interaction.editReply({ embeds: [payEmbed], components: [checkRow] });
-    } catch (error) {
-      console.error(error);
-      await interaction.editReply({ content: '❌ Erro ao gerar cobrança PIX. Verifique se o Token Mercado Pago do dono é válido.' });
-    }
-  }
-
-  if (interaction.isButton() && interaction.customId.startsWith('verificar_')) {
-    const [, paymentId, prodIdStr] = interaction.customId.split('_');
-    const prodId = parseInt(prodIdStr, 10);
-
-    await interaction.deferReply({ ephemeral: true });
-
-    try {
-      const mpClient = new MercadoPagoConfig({ accessToken: license.mp_token });
-      const payment = new Payment(mpClient);
-      const statusRes = await payment.get({ id: paymentId });
-
-      if (statusRes.status === 'approved') {
-        const deliveredItem = await db.popStockItem(prodId, interaction.guildId);
-        if (!deliveredItem) {
-          return interaction.editReply({ content: '⚠️ Pagamento aprovado, mas o estoque acabou segundos antes. Contate o dono da loja com o comprovante ID: ' + paymentId });
-        }
-
-        try {
-          await interaction.user.send(
-            `🎉 **Compra Aprovada na loja ${license.store_name}!**\n\n` +
-            `📦 **Seu produto:**\n\`\`\`${deliveredItem}\`\`\``
-          );
-          await interaction.editReply({ content: '✅ Pagamento confirmado! Seu produto foi enviado na sua **DM**.' });
-        } catch {
-          await interaction.editReply({ content: `✅ Pagamento confirmado! Sua DM estava fechada, então aqui está seu produto:\n\`\`\`${deliveredItem}\`\`\`` });
-        }
-      } else {
-        await interaction.editReply({ content: `⏳ Pagamento ainda consta como **${statusRes.status}**. Aguarde alguns segundos e clique novamente.` });
+  try {
+    if (interaction.isChatInputCommand() && interaction.commandName === 'master') {
+      const masterId = process.env.MASTER_ID?.trim();
+      if (!masterId || interaction.user.id !== masterId) {
+        return interaction.reply({ content: '⛔ Acesso negado. Comando exclusivo do administrador Master.', ephemeral: true });
       }
-    } catch (err) {
-      console.error(err);
-      await interaction.editReply({ content: '❌ Erro ao consultar pagamento.' });
+
+      const sub = interaction.options.getSubcommand();
+      const guildId = interaction.options.getString('id_servidor').trim();
+
+      if (sub === 'ativar') {
+        const ownerId = interaction.options.getString('id_dono').trim();
+        const storeName = interaction.options.getString('nome_loja').trim();
+        const days = interaction.options.getInteger('dias');
+        await db.upsertLicense(guildId, ownerId, storeName, days);
+        return interaction.reply({
+          content: `✅ Loja **${storeName}** (\`${guildId}\`) ativada para <@${ownerId}> por **${days} dias**.`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === 'bloquear') {
+        await db.setLicenseStatus(guildId, false);
+        return interaction.reply({ content: `🔒 Servidor \`${guildId}\` **BLOQUEADO** com sucesso.`, ephemeral: true });
+      }
+
+      if (sub === 'desbloquear') {
+        await db.setLicenseStatus(guildId, true);
+        return interaction.reply({ content: `🔓 Servidor \`${guildId}\` **DESBLOQUEADO** com sucesso.`, ephemeral: true });
+      }
+
+      if (sub === 'status') {
+        const lic = await db.getLicense(guildId);
+        if (!lic) return interaction.reply({ content: '❌ Servidor não cadastrado.', ephemeral: true });
+        return interaction.reply({
+          content:
+            `📊 **Loja:** ${lic.store_name}\n` +
+            `👤 **Dono:** <@${lic.owner_id}>\n` +
+            `⚡ **Status:** ${lic.active && !lic.isExpired ? 'Ativo' : 'Bloqueado/Vencido'}\n` +
+            `⏳ **Dias restantes:** ${lic.daysLeft} dias`,
+          ephemeral: true
+        });
+      }
+    }
+
+    if (!interaction.guildId) return;
+    const license = await db.getLicense(interaction.guildId);
+
+    if (!license || !license.active || license.isExpired) {
+      if (interaction.isRepliable()) {
+        return interaction.reply({
+          content: LOCKED_MESSAGE,
+          ephemeral: true
+        });
+      }
+      return;
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === 'painel_dono') {
+      if (interaction.user.id !== license.owner_id) {
+        return interaction.reply({ content: '⛔ Apenas o Dono registrado desta loja pode usar este painel.', ephemeral: true });
+      }
+
+      const sub = interaction.options.getSubcommand();
+
+      if (sub === 'aluguel') {
+        return interaction.reply({
+          content:
+            `🏪 **Loja:** ${license.store_name}\n` +
+            `⏳ **Tempo restante de aluguel:** **${license.daysLeft} dia(s)**.\n` +
+            `Para renovar, entre em contato em: https://discord.gg/ZQzv7U3Vnw`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === 'config_pix') {
+        const token = interaction.options.getString('access_token').trim();
+        await db.setMpToken(interaction.guildId, token);
+        return interaction.reply({ content: '✅ Token do Mercado Pago salvo com segurança!', ephemeral: true });
+      }
+
+      if (sub === 'criar_produto') {
+        const nome = interaction.options.getString('nome').trim();
+        const preco = interaction.options.getNumber('preco');
+        const desc = interaction.options.getString('descricao').trim();
+        const info = await db.addProduct(interaction.guildId, nome, desc, preco);
+        return interaction.reply({
+          content: `✅ Produto **${nome}** criado com ID **#${info.lastInsertRowid}** (R$ ${preco.toFixed(2)}).`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === 'add_estoque') {
+        const prodId = interaction.options.getInteger('id_produto');
+        const rawItems = interaction.options.getString('itens').split(',').map(i => i.trim()).filter(Boolean);
+        if (rawItems.length === 0) {
+          return interaction.reply({ content: '❌ Informe pelo menos um item válido.', ephemeral: true });
+        }
+        const total = await db.addStock(prodId, interaction.guildId, rawItems);
+        if (total === false) return interaction.reply({ content: '❌ Produto não encontrado.', ephemeral: true });
+        return interaction.reply({ content: `📦 Estoque atualizado! Total disponível agora: **${total} unidade(s)**.`, ephemeral: true });
+      }
+
+      if (sub === 'enviar_vitrine') {
+        const prodId = interaction.options.getInteger('id_produto');
+        const prod = await db.getProduct(prodId, interaction.guildId);
+        if (!prod) return interaction.reply({ content: '❌ Produto não encontrado.', ephemeral: true });
+
+        const stockCount = JSON.parse(prod.stock || '[]').length;
+        const embed = new EmbedBuilder()
+          .setTitle(`🛒 ${license.store_name} — ${prod.name}`)
+          .setDescription(prod.description)
+          .addFields(
+            { name: '💵 Valor', value: `R$ ${Number(prod.price).toFixed(2)}`, inline: true },
+            { name: '📦 Estoque', value: `${stockCount} disponíveis`, inline: true }
+          )
+          .setColor('#2ecc71')
+          .setFooter({ text: 'Entrega automática 24h após confirmação do PIX' });
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`comprar_${prod.id}`)
+            .setLabel('Comprar via PIX')
+            .setStyle(ButtonStyle.Success)
+        );
+
+        await interaction.channel.send({ embeds: [embed], components: [row] });
+        return interaction.reply({ content: '✅ Vitrine enviada no canal!', ephemeral: true });
+      }
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith('comprar_')) {
+      const prodId = parseInt(interaction.customId.split('_')[1], 10);
+      const prod = await db.getProduct(prodId, interaction.guildId);
+
+      if (!prod) return interaction.reply({ content: '❌ Produto indisponível.', ephemeral: true });
+      const stockArray = JSON.parse(prod.stock || '[]');
+      if (stockArray.length === 0) return interaction.reply({ content: '❌ Produto sem estoque no momento.', ephemeral: true });
+      if (!license.mp_token) return interaction.reply({ content: '⚠️ O dono desta loja ainda não configurou o recebimento PIX.', ephemeral: true });
+
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        const mpClient = new MercadoPagoConfig({ accessToken: license.mp_token });
+        const payment = new Payment(mpClient);
+
+        const res = await payment.create({
+          body: {
+            transaction_amount: Number(prod.price),
+            description: `${license.store_name} - ${prod.name}`,
+            payment_method_id: 'pix',
+            payer: { email: `cliente_${interaction.user.id}@vendasbot.com` }
+          }
+        });
+
+        const pixCopiaECola = res.point_of_interaction.transaction_data.qr_code;
+        const paymentId = res.id;
+
+        const payEmbed = new EmbedBuilder()
+          .setTitle(`💠 Pagamento PIX — ${prod.name}`)
+          .setDescription(
+            `Valor: **R$ ${Number(prod.price).toFixed(2)}**\n\n` +
+            `**Código PIX Copia e Cola:**\n\`\`\`${pixCopiaECola}\`\`\`\n` +
+            `Após pagar, clique em **Verificar Pagamento** abaixo.`
+          )
+          .setColor('#00b0f4');
+
+        const checkRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`verificar_${paymentId}_${prod.id}`)
+            .setLabel('Verificar Pagamento')
+            .setStyle(ButtonStyle.Primary)
+        );
+
+        await interaction.editReply({ embeds: [payEmbed], components: [checkRow] });
+      } catch (error) {
+        console.error('❌ Erro ao gerar cobrança PIX:', error);
+        await interaction.editReply({ content: '❌ Erro ao gerar cobrança PIX. Verifique se o Token Mercado Pago do dono é válido.' });
+      }
+    }
+
+    if (interaction.isButton() && interaction.customId.startsWith('verificar_')) {
+      const [, paymentId, prodIdStr] = interaction.customId.split('_');
+      const prodId = parseInt(prodIdStr, 10);
+
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        const mpClient = new MercadoPagoConfig({ accessToken: license.mp_token });
+        const payment = new Payment(mpClient);
+        const statusRes = await payment.get({ id: paymentId });
+
+        if (statusRes.status === 'approved') {
+          const deliveredItem = await db.popStockItem(prodId, interaction.guildId);
+          if (!deliveredItem) {
+            return interaction.editReply({
+              content: '⚠️ Pagamento aprovado, mas o estoque acabou segundos antes. Contate o dono da loja com o comprovante ID: ' + paymentId
+            });
+          }
+
+          try {
+            await interaction.user.send(
+              `🎉 **Compra Aprovada na loja ${license.store_name}!**\n\n` +
+              `📦 **Seu produto:**\n\`\`\`${deliveredItem}\`\`\``
+            );
+            await interaction.editReply({ content: '✅ Pagamento confirmado! Seu produto foi enviado na sua **DM**.' });
+          } catch {
+            await interaction.editReply({
+              content: `✅ Pagamento confirmado! Sua DM estava fechada, então aqui está seu produto:\n\`\`\`${deliveredItem}\`\`\``
+            });
+          }
+        } else {
+          await interaction.editReply({
+            content: `⏳ Pagamento ainda consta como **${statusRes.status}**. Aguarde alguns segundos e clique novamente.`
+          });
+        }
+      } catch (err) {
+        console.error('❌ Erro ao consultar pagamento:', err);
+        await interaction.editReply({ content: '❌ Erro ao consultar pagamento.' });
+      }
+    }
+  } catch (err) {
+    console.error('❌ Erro inesperado na interação:', err);
+    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+      await interaction.reply({ content: '❌ Ocorreu um erro ao processar sua solicitação.', ephemeral: true }).catch(() => {});
     }
   }
 });
 
+async function startBot() {
+  const token = process.env.DISCORD_TOKEN?.trim();
+  if (!token) {
+    throw new Error('DISCORD_TOKEN não está definido nas variáveis de ambiente.');
+  }
+  await client.login(token);
+}
+
 module.exports = {
-  startBot: () => client.login(process.env.DISCORD_TOKEN),
+  startBot,
   client
 };
