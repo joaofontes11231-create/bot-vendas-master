@@ -15,13 +15,12 @@ const {
   ChannelType,
   PermissionFlagsBits
 } = require('discord.js');
-const { MercadoPagoConfig, Payment } = require('mercadopago');
 const db = require('./database');
 
 const OFFICIAL_DISCORD = 'https://discord.gg/ZQzv7U3Vnw';
 
 const LOCKED_MSG =
-  `🤖 **Robô de Vendas Automáticas**\n` +
+  `🤖 **Sistema de Hospedagem & Vendas**\n` +
   `• **Estado do Robô:** 🔴 Desligado (Aguardando ativação)\n` +
   `• **Discord Oficial:** ${OFFICIAL_DISCORD}\n` +
   `*Entre em contato no servidor oficial para ativar o sistema.*`;
@@ -32,6 +31,19 @@ const client = new Client({
 
 client.on('error', (err) => console.error('❌ Erro no client:', err));
 client.on('shardError', (err) => console.error('❌ Erro de shard/WebSocket:', err));
+
+function isValidImageUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+function formatDateBR(ts) {
+  return new Date(Number(ts)).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+}
 
 async function findMainTextChannel(guild) {
   if (!guild) return null;
@@ -57,32 +69,30 @@ async function notifyLicenseActivated(license) {
   const guildName = guild ? guild.name : license.guild_id;
 
   const dmText =
-    `✅ **Robô de Vendas Automáticas Ativado!**\n\n` +
-    `🏪 **Loja:** ${license.store_name}\n` +
+    `✅ **Robô Profissional de Hospedagem Ativado!**\n\n` +
+    `🏢 **Empresa/Loja:** ${license.store_name}\n` +
     `🖥️ **Servidor:** ${guildName} (\`${license.guild_id}\`)\n` +
-    `⚡ **Estado do Robô:** 🟢 Ligado / Ativo\n` +
+    `⚡ **Estado do Robô:** 🟢 Ligado / Ativo 24h\n` +
     `⏳ **Prazo:** **${license.daysLeft} dia(s)**\n` +
     `💬 **Discord Oficial:** ${OFFICIAL_DISCORD}`;
 
   try {
     const ownerUser = await client.users.fetch(license.owner_id);
-    if (ownerUser) {
-      await ownerUser.send(dmText);
-    }
+    if (ownerUser) await ownerUser.send(dmText);
   } catch (err) {
-    console.warn('⚠️ Não foi possível enviar DM para o dono:', err.message);
+    console.warn('⚠️ DM fechada do dono:', err.message);
   }
 
   if (guild) {
     const channel = await findMainTextChannel(guild);
     if (channel) {
       await channel.send(
-        `🟢 **Robô de Vendas Automáticas Ligado!**\n` +
-        `• **Loja:** **${license.store_name}**\n` +
+        `🟢 **Robô de Hospedagem Ligado e Ativo!**\n` +
+        `• **Empresa:** **${license.store_name}**\n` +
         `• **Dono:** <@${license.owner_id}>\n` +
         `• **Duração:** **${license.daysLeft} dia(s)**\n` +
         `• **Discord Oficial:** ${OFFICIAL_DISCORD}`
-      ).catch(err => console.warn('⚠️ Sem permissão para avisar no canal do servidor:', err.message));
+      ).catch(() => {});
     }
   }
 }
@@ -96,35 +106,255 @@ client.on('guildCreate', async (guild) => {
   }
 });
 
+// CONSTRUTORES DOS 3 PAINÉIS FIXOS (MASTER, DONO, CLIENTE)
+async function renderMasterFixedPanel() {
+  const m = await db.getGlobalMetrics();
+
+  const embed = new EmbedBuilder()
+    .setTitle('👑 CENTRAL ADMINISTRATIVA — MASTER (24H)')
+    .setDescription(`🟢 **SISTEMA ATIVO** • Atualizado às ${new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`)
+    .addFields(
+      { name: '👥 Clientes (Donos)', value: `**${m.totalClients}**`, inline: true },
+      { name: '🏢 Lojas Ativas', value: `**${m.activeStores}/${m.totalStores}**`, inline: true },
+      { name: '🖥️ Hospedagens Ativas', value: `**${m.activeHostings}/${m.totalHostings}**`, inline: true },
+      { name: '💰 Vendas Aprovadas', value: `**R$ ${m.totalRevenue.toFixed(2)}** (${m.approvedOrdersCount})`, inline: true },
+      { name: '⏳ Pedidos Pendentes', value: `**${m.pendingOrdersCount}**`, inline: true },
+      { name: '📡 Monitoramento', value: 'Bot: 🟢 Online\nBanco: 🟢 Online\nSite: 🟢 Online', inline: true }
+    )
+    .setColor('#f1c40f')
+    .setFooter({ text: 'Painel fixo atualizado automaticamente 24h' });
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('fp_refresh_master').setLabel('Atualizar Agora').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('fp_master_clients').setLabel('Ver Clientes').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId('fp_master_pending').setLabel('Pedidos Pendentes').setStyle(ButtonStyle.Success)
+  );
+
+  return { embeds: [embed], components: [row] };
+}
+
+async function renderOwnerFixedPanel(guildId) {
+  const license = await db.getLicense(guildId);
+  if (!license) {
+    return {
+      embeds: [new EmbedBuilder().setTitle('⚠️ Loja não licenciada').setDescription(LOCKED_MSG).setColor('#e74c3c')],
+      components: []
+    };
+  }
+
+  const products = await db.getProductsByGuild(guildId);
+  const hostings = await db.getHostingsByGuild(guildId);
+  const orders = await db.getOrdersByGuild(guildId);
+  const pending = orders.filter(o => o.status === 'pending');
+  const activeHos = hostings.filter(h => h.status === 'active');
+  const revenue = orders.filter(o => o.status === 'approved').reduce((a, b) => a + Number(b.final_price || 0), 0);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🏢 PAINEL DE GERENCIAMENTO — ${license.store_name}`)
+    .setDescription(
+      `${license.isOperational ? '🟢 **SISTEMA ONLINE**' : '🔴 **SISTEMA PAUSADO/MANUTENÇÃO**'} • Atualizado às ${new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`
+    )
+    .addFields(
+      { name: '⏳ Licença do Robô', value: `**${license.daysLeft} dia(s)**`, inline: true },
+      { name: '💳 Chave PIX', value: license.pix_key ? `\`${license.pix_key}\`` : '❌ Não definida', inline: true },
+      { name: '📦 Planos Ativos', value: `**${products.length}**`, inline: true },
+      { name: '🖥️ Hospedagens Ativas', value: `**${activeHos.length}/${hostings.length}**`, inline: true },
+      { name: '⏳ Pedidos Aguardando', value: `**${pending.length}**`, inline: true },
+      { name: '💰 Faturamento', value: `**R$ ${revenue.toFixed(2)}**`, inline: true }
+    )
+    .setColor('#2ecc71')
+    .setFooter({ text: 'Painel fixo do dono • Atualização automática 24h' });
+
+  if (license.store_photo && isValidImageUrl(license.store_photo)) {
+    embed.setThumbnail(license.store_photo);
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('fp_refresh_owner').setLabel('Atualizar Painel').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId('fp_owner_orders').setLabel(`Pedidos Pendentes (${pending.length})`).setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('fp_owner_hostings').setLabel('Hospedagens').setStyle(ButtonStyle.Secondary)
+  );
+
+  return { embeds: [embed], components: [row] };
+}
+
+async function renderCustomerFixedPanel(guildId, customerId) {
+  const license = await db.getLicense(guildId);
+  const hostings = await db.getHostingsByCustomer(customerId, guildId);
+  const latest = hostings[0];
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🖥️ PAINEL DE HOSPEDAGEM — ${license ? license.store_name : 'Cliente'}`)
+    .setFooter({ text: `Cliente ID: ${customerId} • Atualização automática 24h` });
+
+  if (!latest) {
+    embed
+      .setDescription('🔴 **NENHUMA HOSPEDAGEM ATIVA**\nVocê ainda não possui hospedagens aprovadas neste servidor.')
+      .setColor('#95a5a6');
+  } else {
+    const isOnline = latest.status === 'active';
+    embed
+      .setDescription(`${isOnline ? '🟢 **ONLINE**' : '🔴 **SUSPENSO / VENCIDO**'} • Atualizado às ${new Date().toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo' })}`)
+      .addFields(
+        { name: '🆔 ID da Hospedagem', value: `**${latest.code}**`, inline: true },
+        { name: '📦 Plano', value: `**${latest.plan_name}**`, inline: true },
+        { name: '⚡ Status', value: isOnline ? 'Ativo' : 'Suspenso', inline: true },
+        { name: '📅 Contratação', value: formatDateBR(latest.created_at), inline: true },
+        { name: '⏳ Vencimento', value: `${formatDateBR(latest.expires_at)} (**${latest.daysLeft}d**)`, inline: true },
+        { name: '📊 Total de Serviços', value: `${hostings.length} hospedagem(ns)`, inline: true },
+        { name: '⚙️ Recursos / Acesso', value: `${latest.specs || 'Conforme o plano'}\n${latest.access_info ? `🔑 **Dados:** \`${latest.access_info}\`` : ''}` }
+      )
+      .setColor(isOnline ? '#2ecc71' : '#e74c3c');
+  }
+
+  if (license?.store_photo && isValidImageUrl(license.store_photo)) {
+    embed.setThumbnail(license.store_photo);
+  }
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`fp_cust_renew_${customerId}`).setLabel('Renovar').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`fp_cust_invoices_${customerId}`).setLabel('Faturas').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`fp_cust_support_${customerId}`).setLabel('Suporte').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`fp_cust_refresh_${customerId}`).setLabel('Atualizar').setStyle(ButtonStyle.Secondary)
+  );
+
+  return { embeds: [embed], components: [row] };
+}
+
+async function refreshAllFixedPanels() {
+  const panels = await db.getAllFixedPanels();
+  for (const p of panels) {
+    try {
+      const channel = client.channels.cache.get(p.channel_id) || (await client.channels.fetch(p.channel_id).catch(() => null));
+      if (!channel || !channel.isTextBased()) {
+        await db.removeFixedPanel(p.message_id);
+        continue;
+      }
+      const msg = await channel.messages.fetch(p.message_id).catch(() => null);
+      if (!msg) {
+        await db.removeFixedPanel(p.message_id);
+        continue;
+      }
+
+      let payload = null;
+      if (p.panel_type === 'master') payload = await renderMasterFixedPanel();
+      if (p.panel_type === 'owner') payload = await renderOwnerFixedPanel(p.guild_id);
+      if (p.panel_type === 'customer') payload = await renderCustomerFixedPanel(p.guild_id, p.target_id);
+
+      if (payload) await msg.edit(payload);
+    } catch (err) {
+      console.warn('⚠️ Falha ao atualizar painel fixo:', err.message);
+    }
+  }
+}
+
+// WORKER 24H: VERIFICA VENCIMENTOS (7D, 3D, 1D ANTES, NO VENCIMENTO E APÓS) + ATUALIZA PAINÉIS FIXOS
+async function runScheduledChecks() {
+  try {
+    const allHostings = await db.getAllHostings();
+    const now = Date.now();
+
+    for (const hos of allHostings) {
+      const daysLeft = calcDaysExact(hos.expires_at, now);
+
+      // Alertas de 7 dias, 3 dias e 1 dia antes
+      for (const milestone of [7, 3, 1]) {
+        if (hos.status === 'active' && daysLeft === milestone) {
+          const ref = `hos_${hos.code}_warn_${milestone}d`;
+          if (!(await db.wasNotified(ref))) {
+            await sendUserAlert(
+              hos.customer_id,
+              `⚠️ **Aviso de Vencimento — ${hos.code}**\n` +
+              `Sua hospedagem **${hos.plan_name}** vence em **${milestone} dia(s)** (${formatDateBR(hos.expires_at)}).\n` +
+              `Use \`/painel\` ou \`/renovar\` no servidor para renovar e evitar suspensão!`
+            );
+            await db.markNotified(ref);
+          }
+        }
+      }
+
+      // Venceu agora -> suspende e avisa
+      if (hos.status === 'active' && hos.expires_at <= now) {
+        await db.updateHostingStatus(hos.code, 'suspended');
+        const refExp = `hos_${hos.code}_expired`;
+        if (!(await db.wasNotified(refExp))) {
+          await sendUserAlert(
+            hos.customer_id,
+            `🔴 **Hospedagem Suspensa por Vencimento — ${hos.code}**\n` +
+            `Sua hospedagem **${hos.plan_name}** venceu em ${formatDateBR(hos.expires_at)} e foi suspensa.\n` +
+            `Renove no servidor para reativar imediatamente!`
+          );
+          await db.markNotified(refExp);
+        }
+      }
+    }
+
+    // Alerta de 1 dia antes para donos de licença do bot
+    const licenses = await db.getAllLicenses();
+    for (const lic of licenses) {
+      if (lic.active && lic.daysLeft === 1) {
+        const ref = `lic_${lic.guild_id}_1d_${formatDateBR(lic.expires_at)}`;
+        if (!(await db.wasNotified(ref))) {
+          await sendUserAlert(
+            lic.owner_id,
+            `⏳ **Aviso de Aluguel do Robô — ${lic.store_name}**\n` +
+            `Falta **1 dia** para o vencimento da licença do seu servidor (\`${lic.guild_id}\`).\n` +
+            `Entre em contato no Discord Oficial (${OFFICIAL_DISCORD}) para renovar.`
+          );
+          await db.markNotified(ref);
+        }
+      }
+    }
+
+    await refreshAllFixedPanels();
+  } catch (err) {
+    console.error('❌ Erro no worker 24h:', err);
+  }
+}
+
+function calcDaysExact(expiresAt, now = Date.now()) {
+  const diff = Number(expiresAt) - now;
+  if (diff <= 0) return 0;
+  return Math.ceil(diff / (1000 * 60 * 60 * 24));
+}
+
+async function sendUserAlert(userId, content) {
+  try {
+    const user = await client.users.fetch(userId);
+    if (user) await user.send(content);
+  } catch {
+    // Usuário com DM fechada
+  }
+}
+
+// SLASH COMMANDS
 const commands = [
   new SlashCommandBuilder()
-    .setName('master')
-    .setDescription('[MASTER] Gerenciar clientes, lojas, bloqueios e painel geral')
+    .setName('admin')
+    .setDescription('[MASTER] Central administrativa fixa 24h e gestão completa')
+    .addSubcommand(s => s.setName('painel_fixo').setDescription('Fixa o painel administrativo do Master neste canal (atualiza 24h)'))
     .addSubcommand(s =>
       s.setName('ativar')
-        .setDescription('Ativa ou renova uma loja e notifica dono e servidor')
+        .setDescription('Ativa ou renova uma empresa/loja e avisa dono e servidor')
         .addStringOption(o => o.setName('id_servidor').setDescription('ID do Servidor').setRequired(true))
-        .addStringOption(o => o.setName('id_dono').setDescription('ID da Conta do Dono').setRequired(true))
-        .addStringOption(o => o.setName('nome_loja').setDescription('Nome da Loja').setRequired(true))
-        .addIntegerOption(o => o.setName('dias').setDescription('Dias de aluguel').setRequired(true))
+        .addStringOption(o => o.setName('id_dono').setDescription('ID do Dono').setRequired(true))
+        .addStringOption(o => o.setName('nome_empresa').setDescription('Nome da Empresa/Loja').setRequired(true))
+        .addIntegerOption(o => o.setName('dias').setDescription('Dias de licença').setRequired(true))
     )
-    .addSubcommand(s =>
-      s.setName('clientes')
-        .setDescription('Painel com TODOS os clientes cadastrados e suas lojas')
-    )
+    .addSubcommand(s => s.setName('clientes').setDescription('Lista todos os clientes (donos) e suas lojas'))
     .addSubcommand(s =>
       s.setName('remover_cliente')
-        .setDescription('Remove um cliente e TODAS as lojas/produtos dele da lista')
-        .addStringOption(o => o.setName('id_dono').setDescription('ID do Dono (Cliente)').setRequired(true))
+        .setDescription('Remove um cliente e todas as lojas dele')
+        .addStringOption(o => o.setName('id_dono').setDescription('ID do Dono').setRequired(true))
     )
     .addSubcommand(s =>
       s.setName('remover_loja')
-        .setDescription('Remove apenas uma loja específica pelo ID do servidor')
+        .setDescription('Remove uma loja específica')
         .addStringOption(o => o.setName('id_servidor').setDescription('ID do Servidor').setRequired(true))
     )
     .addSubcommand(s =>
       s.setName('bloquear')
-        .setDescription('Bloqueia imediatamente um servidor')
+        .setDescription('Bloqueia um servidor')
         .addStringOption(o => o.setName('id_servidor').setDescription('ID do Servidor').setRequired(true))
     )
     .addSubcommand(s =>
@@ -132,53 +362,103 @@ const commands = [
         .setDescription('Desbloqueia um servidor')
         .addStringOption(o => o.setName('id_servidor').setDescription('ID do Servidor').setRequired(true))
     )
-    .addSubcommand(s =>
-      s.setName('status')
-        .setDescription('Consulta dias restantes e status de um servidor')
-        .addStringOption(o => o.setName('id_servidor').setDescription('ID do Servidor').setRequired(true))
-    )
-    .addSubcommand(s =>
-      s.setName('painel')
-        .setDescription('Painel completo do Master com resumo geral')
-    ),
+    .addSubcommand(s => s.setName('logs').setDescription('Consulta logs administrativos de auditoria')),
 
   new SlashCommandBuilder()
     .setName('painel_dono')
-    .setDescription('[DONO] Gerencia loja, foto exclusiva, PIX, estoque e vitrine')
-    .addSubcommand(s => s.setName('painel').setDescription('Painel completo da sua loja com todas as informações'))
-    .addSubcommand(s => s.setName('aluguel').setDescription('Dias restantes do aluguel'))
-    .addSubcommand(s =>
-      s.setName('foto_loja')
-        .setDescription('Define a foto/imagem exclusiva da sua loja neste servidor')
-        .addStringOption(o => o.setName('url_imagem').setDescription('Link direto da imagem (https://...) ou "remover"').setRequired(true))
-    )
+    .setDescription('[DONO] Painel fixo 24h, planos, pedidos PIX, hospedagens e configurações')
+    .addSubcommand(s => s.setName('painel_fixo').setDescription('Fixa o painel da sua empresa neste canal (atualiza 24h)'))
     .addSubcommand(s =>
       s.setName('config_pix')
-        .setDescription('Configura seu Access Token do Mercado Pago')
-        .addStringOption(o => o.setName('access_token').setDescription('Token de Produção Mercado Pago').setRequired(true))
+        .setDescription('Define sua Chave PIX (CPF, CNPJ, E-mail, Telefone ou Aleatória) para receber')
+        .addStringOption(o => o.setName('chave_pix').setDescription('Sua chave PIX').setRequired(true))
     )
     .addSubcommand(s =>
-      s.setName('criar_produto')
-        .setDescription('Cria produto na loja e exibe o ID gerado')
-        .addStringOption(o => o.setName('nome').setDescription('Nome do produto').setRequired(true))
-        .addNumberOption(o => o.setName('preco').setDescription('Preço em R$ (ex: 15.50)').setRequired(true))
-        .addStringOption(o => o.setName('descricao').setDescription('Descrição do produto').setRequired(true))
+      s.setName('foto_loja')
+        .setDescription('Define a foto exclusiva da sua empresa apenas neste servidor')
+        .addStringOption(o => o.setName('url_imagem').setDescription('Link da imagem (https://...) ou "remover"').setRequired(true))
     )
     .addSubcommand(s =>
-      s.setName('add_estoque')
-        .setDescription('Adiciona itens ao estoque de um produto')
-        .addIntegerOption(o => o.setName('id_produto').setDescription('ID do produto').setRequired(true))
-        .addStringOption(o => o.setName('itens').setDescription('Itens separados por vírgula').setRequired(true))
+      s.setName('canal_logs')
+        .setDescription('Define o canal de logs de pedidos e hospedagens')
+        .addChannelOption(o => o.setName('canal').setDescription('Canal de texto').setRequired(true))
+    )
+    .addSubcommand(s =>
+      s.setName('manutencao')
+        .setDescription('Ativa ou desativa modo manutenção da loja')
+        .addBooleanOption(o => o.setName('ativo').setDescription('True para ativar manutenção').setRequired(true))
+    )
+    .addSubcommand(s =>
+      s.setName('criar_plano')
+        .setDescription('Cria plano de hospedagem e exibe o ID')
+        .addStringOption(o => o.setName('nome').setDescription('Nome do plano (ex: Host Bot Basic)').setRequired(true))
+        .addNumberOption(o => o.setName('preco').setDescription('Preço em R$').setRequired(true))
+        .addIntegerOption(o => o.setName('dias').setDescription('Duração em dias (padrão 30)').setRequired(true))
+        .addStringOption(o => o.setName('especificacoes').setDescription('RAM, CPU, SSD, detalhes').setRequired(true))
+    )
+    .addSubcommand(s =>
+      s.setName('criar_cupom')
+        .setDescription('Cria cupom de desconto para clientes')
+        .addStringOption(o => o.setName('codigo').setDescription('Código do cupom (ex: PROMO10)').setRequired(true))
+        .addIntegerOption(o => o.setName('desconto').setDescription('Porcentagem de desconto (1 a 95)').setRequired(true))
+    )
+    .addSubcommand(s =>
+      s.setName('aprovar_pedido')
+        .setDescription('Confirma PIX recebido e libera a hospedagem do cliente')
+        .addStringOption(o => o.setName('codigo_pedido').setDescription('Código do pedido (ex: PED-00001)').setRequired(true))
+        .addStringOption(o => o.setName('dados_acesso').setDescription('Link do painel, IP, usuário/senha entregues ao cliente').setRequired(true))
+    )
+    .addSubcommand(s =>
+      s.setName('gerenciar_hospedagem')
+        .setDescription('Renova, suspende, reativa ou exclui uma hospedagem')
+        .addStringOption(o => o.setName('codigo_hospedagem').setDescription('Código (ex: HOS-00001)').setRequired(true))
+        .addStringOption(o =>
+          o.setName('acao')
+            .setDescription('Ação desejada')
+            .setRequired(true)
+            .addChoices(
+              { name: 'Renovar +30 dias', value: 'renovar' },
+              { name: 'Suspender', value: 'suspender' },
+              { name: 'Reativar', value: 'reativar' },
+              { name: 'Excluir', value: 'excluir' }
+            )
+        )
     )
     .addSubcommand(s =>
       s.setName('enviar_vitrine')
-        .setDescription('Envia o painel de compra neste canal')
-        .addIntegerOption(o => o.setName('id_produto').setDescription('ID do produto').setRequired(true))
+        .setDescription('Envia vitrine de compra de um plano neste canal')
+        .addIntegerOption(o => o.setName('id_plano').setDescription('ID do plano').setRequired(true))
     ),
 
   new SlashCommandBuilder()
     .setName('produtos')
-    .setDescription('[DONO] Lista todos os produtos com ID para editar ou remover')
+    .setDescription('[DONO] Lista todos os planos com ID para editar ou remover'),
+
+  new SlashCommandBuilder()
+    .setName('painel')
+    .setDescription('[CLIENTE] Abre seu painel fixo de hospedagem (atualiza automaticamente 24h)'),
+
+  new SlashCommandBuilder()
+    .setName('loja')
+    .setDescription('[CLIENTE] Abre o catálogo de hospedagens disponíveis para contratar'),
+
+  new SlashCommandBuilder()
+    .setName('minhas_hospedagens')
+    .setDescription('[CLIENTE] Lista todas as suas hospedagens, datas e status'),
+
+  new SlashCommandBuilder()
+    .setName('suporte')
+    .setDescription('[CLIENTE] Abre um ticket privado de suporte com a equipe')
+    .addStringOption(o =>
+      o.setName('categoria')
+        .setDescription('Categoria do atendimento')
+        .setRequired(true)
+        .addChoices(
+          { name: 'Suporte Técnico', value: 'tecnico' },
+          { name: 'Financeiro / PIX', value: 'financeiro' },
+          { name: 'Vendas / Planos', value: 'vendas' }
+        )
+    )
 ].map(c => c.toJSON());
 
 async function registerCommands() {
@@ -202,350 +482,377 @@ async function onBotReady() {
   if (process.env.REGISTER_COMMANDS === 'true') {
     await registerCommands();
   }
+  await runScheduledChecks();
+  setInterval(runScheduledChecks, 5 * 60 * 1000);
 }
 
-client.once('ready', onBotReady);
 client.once('clientReady', onBotReady);
-
-const getMP = (token) => new Payment(new MercadoPagoConfig({ accessToken: token }));
-
-function isValidImageUrl(url) {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
-  } catch {
-    return false;
-  }
-}
+client.once('ready', onBotReady);
 
 async function buildProductsView(guildId) {
   const products = await db.getProductsByGuild(guildId);
-
   if (!products.length) {
     return {
       embed: new EmbedBuilder()
-        .setTitle('📦 Produtos da Loja')
-        .setDescription('Nenhum produto cadastrado ainda.\nUse `/painel_dono criar_produto` para criar o primeiro e ver o **ID**.')
+        .setTitle('📦 Planos de Hospedagem')
+        .setDescription('Nenhum plano criado ainda. Use `/painel_dono criar_plano` para criar e ver o **ID**.')
         .setColor('#95a5a6'),
       components: []
     };
   }
 
-  const lines = products.map(p => {
-    const stockCount = JSON.parse(p.stock || '[]').length;
-    return `• **ID #${p.id}** — **${p.name}** | R$ ${Number(p.price).toFixed(2)} | Estoque: **${stockCount}**\n  _${p.description}_`;
-  });
+  const lines = products.map(p =>
+    `• **ID #${p.id}** — **${p.name}** | R$ ${Number(p.price).toFixed(2)} (${p.duration_days || 30}d)\n  _${p.specs || p.description}_`
+  );
 
   const embed = new EmbedBuilder()
-    .setTitle('📦 Gerenciador de Produtos')
+    .setTitle('📦 Gerenciador de Planos')
     .setDescription(lines.join('\n\n').slice(0, 4000))
     .setColor('#3498db')
-    .setFooter({ text: 'Selecione um produto abaixo para editar ou remover' });
+    .setFooter({ text: 'Selecione um plano abaixo para editar ou remover' });
 
   const options = products.slice(0, 25).map(p => ({
     label: `#${p.id} - ${p.name}`.slice(0, 100),
-    description: `R$ ${Number(p.price).toFixed(2)} • Estoque: ${JSON.parse(p.stock || '[]').length}`.slice(0, 100),
+    description: `R$ ${Number(p.price).toFixed(2)} • ${p.duration_days || 30} dia(s)`.slice(0, 100),
     value: String(p.id)
   }));
 
-  const selectRow = new ActionRowBuilder().addComponents(
+  const row = new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId('prod_select')
-      .setPlaceholder('Escolha um produto pelo ID...')
+      .setPlaceholder('Escolha um plano pelo ID...')
       .addOptions(options)
   );
 
-  return { embed, components: [selectRow] };
+  return { embed, components: [row] };
 }
 
 client.on('interactionCreate', async (interaction) => {
   try {
-    // COMANDOS /MASTER
-    if (interaction.isChatInputCommand() && interaction.commandName === 'master') {
-      if (interaction.user.id !== process.env.MASTER_ID?.trim()) {
+    const isMaster = interaction.user.id === process.env.MASTER_ID?.trim();
+
+    // /ADMIN (MASTER)
+    if (interaction.isChatInputCommand() && interaction.commandName === 'admin') {
+      if (!isMaster) {
         return interaction.reply({ content: '⛔ Acesso negado. Comando exclusivo do Master.', ephemeral: true });
       }
       const sub = interaction.options.getSubcommand();
 
-      if (sub === 'painel') {
-        const all = await db.getAllLicenses();
-        const activeCount = all.filter(l => l.isOperational).length;
-        const ownersCount = new Set(all.map(l => l.owner_id)).size;
+      if (sub === 'painel_fixo') {
+        const payload = await renderMasterFixedPanel();
+        const msg = await interaction.channel.send(payload);
+        await db.registerFixedPanel('master', interaction.guildId || 'global', interaction.user.id, interaction.channelId, msg.id);
+        return interaction.reply({ content: '✅ Painel administrativo fixado neste canal! Ele atualiza automaticamente 24h.', ephemeral: true });
+      }
 
-        const resumo = all.slice(0, 15).map(l =>
-          `• **${l.store_name}** (\`${l.guild_id}\`) — Dono: <@${l.owner_id}> | ${l.isOperational ? '🟢 Ativo' : '🔴 Inativo'} (${l.daysLeft}d)`
-        ).join('\n') || 'Nenhuma loja cadastrada.';
-
-        const embed = new EmbedBuilder()
-          .setTitle('👑 Painel Geral — Master')
-          .addFields(
-            { name: '🏪 Total de Lojas', value: `${all.length}`, inline: true },
-            { name: '🟢 Lojas Ativas', value: `${activeCount}`, inline: true },
-            { name: '👤 Clientes (Donos)', value: `${ownersCount}`, inline: true },
-            { name: '📋 Lojas Recentes', value: resumo.slice(0, 1024) }
-          )
-          .setColor('#f1c40f');
-
-        return interaction.reply({ embeds: [embed], ephemeral: true });
+      if (sub === 'ativar') {
+        const guildId = interaction.options.getString('id_servidor').trim();
+        const ownerId = interaction.options.getString('id_dono').trim();
+        const storeName = interaction.options.getString('nome_empresa').trim();
+        const days = interaction.options.getInteger('dias');
+        const lic = await db.upsertLicense(guildId, ownerId, storeName, days);
+        await db.logAudit(guildId, interaction.user.id, 'ATIVAR_LICENCA', `${storeName} (${days}d) para ${ownerId}`);
+        await notifyLicenseActivated(lic);
+        await refreshAllFixedPanels();
+        return interaction.reply({
+          content: `✅ Empresa **${lic.store_name}** (\`${lic.guild_id}\`) ativada para <@${lic.owner_id}> por **${lic.daysLeft}d** e avisos enviados!`,
+          ephemeral: true
+        });
       }
 
       if (sub === 'clientes') {
         const all = await db.getAllLicenses();
-        if (!all.length) {
-          return interaction.reply({ content: '📭 Nenhum cliente cadastrado ainda.', ephemeral: true });
-        }
-
+        if (!all.length) return interaction.reply({ content: '📭 Nenhum cliente cadastrado.', ephemeral: true });
         const grouped = new Map();
-        for (const lic of all) {
-          if (!grouped.has(lic.owner_id)) grouped.set(lic.owner_id, []);
-          grouped.get(lic.owner_id).push(lic);
+        for (const l of all) {
+          if (!grouped.has(l.owner_id)) grouped.set(l.owner_id, []);
+          grouped.get(l.owner_id).push(l);
         }
-
-        const blocks = [];
-        for (const [ownerId, stores] of grouped.entries()) {
-          const storeLines = stores
-            .map(s => `   ↳ **${s.store_name}** (\`${s.guild_id}\`) — ${s.isOperational ? '🟢 Ativo' : '🔴 Inativo'} • **${s.daysLeft}d**`)
-            .join('\n');
-          blocks.push(`👤 **Cliente:** <@${ownerId}> (\`${ownerId}\`) — **${stores.length} loja(s)**\n${storeLines}`);
-        }
-
-        const embed = new EmbedBuilder()
-          .setTitle(`👥 Todos os Clientes (${grouped.size})`)
-          .setDescription(blocks.join('\n\n').slice(0, 4000))
-          .setFooter({ text: 'Use /master remover_cliente ou /master remover_loja para remover da lista' })
-          .setColor('#3498db');
-
-        return interaction.reply({ embeds: [embed], ephemeral: true });
+        const text = Array.from(grouped.entries()).map(([oid, list]) => {
+          const lines = list.map(s => `  ↳ **${s.store_name}** (\`${s.guild_id}\`) — ${s.isOperational ? '🟢 Ativo' : '🔴 Inativo'} (${s.daysLeft}d)`).join('\n');
+          return `👤 **Cliente:** <@${oid}> (\`${oid}\`)\n${lines}`;
+        }).join('\n\n');
+        return interaction.reply({
+          embeds: [new EmbedBuilder().setTitle(`👥 Clientes Cadastrados (${grouped.size})`).setDescription(text.slice(0, 4000)).setColor('#3498db')],
+          ephemeral: true
+        });
       }
 
       if (sub === 'remover_cliente') {
-        const ownerId = interaction.options.getString('id_dono').trim();
-        const removedCount = await db.deleteOwnerAndStores(ownerId);
-        if (!removedCount) {
-          return interaction.reply({ content: `❌ Nenhuma loja encontrada para o cliente \`${ownerId}\`.`, ephemeral: true });
-        }
-        return interaction.reply({
-          content: `🗑️ Cliente <@${ownerId}> (\`${ownerId}\`) e **${removedCount} loja(s)** removidos da lista com sucesso!`,
-          ephemeral: true
-        });
+        const oid = interaction.options.getString('id_dono').trim();
+        const count = await db.deleteOwnerAndStores(oid);
+        await db.logAudit('global', interaction.user.id, 'REMOVER_CLIENTE', `Dono ${oid} (${count} lojas)`);
+        await refreshAllFixedPanels();
+        return interaction.reply({ content: count ? `🗑️ Cliente \`${oid}\` e **${count} loja(s)** removidos!` : '❌ Cliente não encontrado.', ephemeral: true });
       }
 
       if (sub === 'remover_loja') {
-        const guildId = interaction.options.getString('id_servidor').trim();
-        const ok = await db.deleteLicense(guildId);
-        if (!ok) {
-          return interaction.reply({ content: `❌ Loja/servidor \`${guildId}\` não encontrada.`, ephemeral: true });
-        }
-        return interaction.reply({
-          content: `🗑️ Loja do servidor \`${guildId}\` removida da lista com sucesso!`,
-          ephemeral: true
-        });
+        const gid = interaction.options.getString('id_servidor').trim();
+        const ok = await db.deleteLicense(gid);
+        await db.logAudit(gid, interaction.user.id, 'REMOVER_LOJA', `Servidor ${gid}`);
+        await refreshAllFixedPanels();
+        return interaction.reply({ content: ok ? `🗑️ Loja \`${gid}\` removida!` : '❌ Loja não encontrada.', ephemeral: true });
       }
 
-      const guildId = interaction.options.getString('id_servidor').trim();
-
-      if (sub === 'ativar') {
-        const ownerId = interaction.options.getString('id_dono').trim();
-        const storeName = interaction.options.getString('nome_loja').trim();
-        const days = interaction.options.getInteger('dias');
-        const lic = await db.upsertLicense(guildId, ownerId, storeName, days);
-        await notifyLicenseActivated(lic);
-
-        return interaction.reply({
-          content:
-            `✅ Loja **${lic.store_name}** (\`${lic.guild_id}\`) ativada para <@${lic.owner_id}> por **${lic.daysLeft} dia(s)**.\n` +
-            `📩 Avisos enviados na DM do dono e no canal principal do servidor.`,
-          ephemeral: true
-        });
+      if (sub === 'bloquear' || sub === 'desbloquear') {
+        const gid = interaction.options.getString('id_servidor').trim();
+        const active = sub === 'desbloquear';
+        const lic = await db.setLicenseStatus(gid, active);
+        if (active && lic?.isOperational) await notifyLicenseActivated(lic);
+        await db.logAudit(gid, interaction.user.id, active ? 'DESBLOQUEAR' : 'BLOQUEAR', gid);
+        await refreshAllFixedPanels();
+        return interaction.reply({ content: `${active ? '🔓 Desbloqueado' : '🔒 Bloqueado'}: \`${gid}\``, ephemeral: true });
       }
 
-      if (sub === 'bloquear') {
-        await db.setLicenseStatus(guildId, false);
-        return interaction.reply({ content: `🔒 Servidor \`${guildId}\` bloqueado.`, ephemeral: true });
+      if (sub === 'logs') {
+        const logs = await db.getAuditLogs(15);
+        const text = logs.map(l => `• \`${formatDateBR(l.created_at)}\` **${l.action}** por <@${l.actor_id}>: ${l.details}`).join('\n') || 'Sem registros.';
+        return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🛡️ Logs Administrativos').setDescription(text.slice(0, 4000)).setColor('#95a5a6')], ephemeral: true });
       }
+    }
 
-      if (sub === 'desbloquear') {
-        const lic = await db.setLicenseStatus(guildId, true);
-        if (lic && lic.isOperational) await notifyLicenseActivated(lic);
-        return interaction.reply({ content: `🔓 Servidor \`${guildId}\` desbloqueado.`, ephemeral: true });
+    // BOTÕES DO PAINEL FIXO MASTER
+    if (interaction.isButton() && interaction.customId.startsWith('fp_')) {
+      if (interaction.customId === 'fp_refresh_master') {
+        if (!isMaster) return interaction.reply({ content: '⛔ Exclusivo do Master.', ephemeral: true });
+        await interaction.update(await renderMasterFixedPanel());
+        return;
       }
-
-      if (sub === 'status') {
-        const lic = await db.getLicense(guildId);
-        if (!lic) return interaction.reply({ content: '❌ Servidor não cadastrado.', ephemeral: true });
-        return interaction.reply({
-          content:
-            `📊 **Loja:** ${lic.store_name}\n` +
-            `🖥️ **Servidor:** \`${lic.guild_id}\`\n` +
-            `👤 **Dono:** <@${lic.owner_id}>\n` +
-            `⚡ **Status:** ${lic.isOperational ? '🟢 Ativo' : '🔴 Bloqueado/Vencido'}\n` +
-            `⏳ **Dias restantes:** ${lic.daysLeft} dia(s)\n` +
-            `💳 **PIX:** ${lic.mp_token ? 'Configurado' : 'Não configurado'}\n` +
-            `🖼️ **Foto da Loja:** ${lic.store_photo ? 'Definida' : 'Padrão'}`,
-          ephemeral: true
-        });
+      if (interaction.customId === 'fp_master_clients') {
+        if (!isMaster) return interaction.reply({ content: '⛔ Exclusivo do Master.', ephemeral: true });
+        const all = await db.getAllLicenses();
+        const text = all.map(l => `• **${l.store_name}** (\`${l.guild_id}\`) — Dono: <@${l.owner_id}> | ${l.daysLeft}d`).join('\n') || 'Nenhum cliente.';
+        return interaction.reply({ content: text.slice(0, 1900), ephemeral: true });
+      }
+      if (interaction.customId === 'fp_master_pending') {
+        if (!isMaster) return interaction.reply({ content: '⛔ Exclusivo do Master.', ephemeral: true });
+        const m = await db.getGlobalMetrics();
+        const pend = m.orders.filter(o => o.status === 'pending').slice(0, 15);
+        const text = pend.map(o => `• **${o.order_code}** | Servidor \`${o.guild_id}\` | <@${o.customer_id}> | R$ ${Number(o.final_price).toFixed(2)}`).join('\n') || 'Nenhum pedido pendente.';
+        return interaction.reply({ content: text.slice(0, 1900), ephemeral: true });
       }
     }
 
     if (!interaction.guildId) return;
     const license = await db.getLicense(interaction.guildId);
 
-    if (!license || !license.isOperational) {
+    if (!license || (!license.isOperational && interaction.user.id !== license.owner_id && !isMaster)) {
       if (interaction.isRepliable()) {
-        return interaction.reply({ content: LOCKED_MSG, ephemeral: true });
+        return interaction.reply({
+          content: license?.maintenance ? '🛠️ **Empresa em manutenção programada.** Tente novamente em breve.' : LOCKED_MSG,
+          ephemeral: true
+        });
       }
       return;
     }
 
-    // COMANDOS DO DONO
+    // /PAINEL_DONO
     if (interaction.isChatInputCommand() && interaction.commandName === 'painel_dono') {
-      if (interaction.user.id !== license.owner_id) {
-        return interaction.reply({ content: '⛔ Apenas o dono registrado desta loja pode usar este painel.', ephemeral: true });
+      if (interaction.user.id !== license.owner_id && !isMaster) {
+        return interaction.reply({ content: '⛔ Apenas o dono registrado desta empresa pode usar este comando.', ephemeral: true });
       }
       const sub = interaction.options.getSubcommand();
 
-      if (sub === 'painel') {
-        const ownerStores = await db.getLicensesByOwner(interaction.user.id);
-        const products = await db.getProductsByGuild(interaction.guildId);
-        const totalStock = products.reduce((acc, p) => acc + JSON.parse(p.stock || '[]').length, 0);
-
-        const embed = new EmbedBuilder()
-          .setTitle(`🏪 Painel do Dono — ${license.store_name}`)
-          .addFields(
-            { name: '⚡ Estado do Robô', value: '🟢 Ligado / Ativo', inline: true },
-            { name: '⏳ Aluguel Restante', value: `${license.daysLeft} dia(s)`, inline: true },
-            { name: '💳 PIX (Mercado Pago)', value: license.mp_token ? '✅ Configurado' : '❌ Pendente', inline: true },
-            { name: '📦 Produtos', value: `${products.length}`, inline: true },
-            { name: '📊 Estoque Total', value: `${totalStock} item(ns)`, inline: true },
-            { name: '🏬 Suas Lojas', value: `${ownerStores.length} loja(s)`, inline: true },
-            { name: '🖼️ Foto do Servidor', value: license.store_photo ? `[Ver imagem](${license.store_photo})` : 'Nenhuma definida', inline: false },
-            { name: '💬 Discord Oficial', value: OFFICIAL_DISCORD, inline: false }
-          )
-          .setColor('#2ecc71');
-
-        if (license.store_photo && isValidImageUrl(license.store_photo)) {
-          embed.setThumbnail(license.store_photo);
-        }
-
-        return interaction.reply({ embeds: [embed], ephemeral: true });
-      }
-
-      if (sub === 'aluguel') {
-        return interaction.reply({
-          content:
-            `🏪 **Loja:** ${license.store_name}\n` +
-            `⏳ **Restam:** **${license.daysLeft} dia(s)**.\n` +
-            `💬 **Discord Oficial:** ${OFFICIAL_DISCORD}`,
-          ephemeral: true
-        });
-      }
-
-      if (sub === 'foto_loja') {
-        const inputUrl = interaction.options.getString('url_imagem').trim();
-        if (inputUrl.toLowerCase() === 'remover') {
-          await db.setStorePhoto(interaction.guildId, null);
-          return interaction.reply({
-            content: '🗑️ Foto exclusiva desta loja removida. Ela não afeta outros servidores.',
-            ephemeral: true
-          });
-        }
-        if (!isValidImageUrl(inputUrl)) {
-          return interaction.reply({
-            content: '❌ Informe um link válido começando com `https://` ou `http://` (ou digite `remover`).',
-            ephemeral: true
-          });
-        }
-        await db.setStorePhoto(interaction.guildId, inputUrl);
-        return interaction.reply({
-          content: `✅ Foto exclusiva da loja **${license.store_name}** salva! Ela aparecerá **apenas** nas vitrines e painéis deste servidor.`,
-          ephemeral: true
-        });
+      if (sub === 'painel_fixo') {
+        const payload = await renderOwnerFixedPanel(interaction.guildId);
+        const msg = await interaction.channel.send(payload);
+        await db.registerFixedPanel('owner', interaction.guildId, license.owner_id, interaction.channelId, msg.id);
+        return interaction.reply({ content: '✅ Painel fixo da empresa criado! Ele atualiza automaticamente 24h.', ephemeral: true });
       }
 
       if (sub === 'config_pix') {
-        await db.setMpToken(interaction.guildId, interaction.options.getString('access_token').trim());
-        return interaction.reply({ content: '✅ Token do Mercado Pago salvo com segurança!', ephemeral: true });
+        const key = interaction.options.getString('chave_pix').trim();
+        await db.updateLicenseDetails(interaction.guildId, { pixKey: key });
+        await db.logAudit(interaction.guildId, interaction.user.id, 'CONFIG_PIX', 'Chave PIX atualizada');
+        await refreshAllFixedPanels();
+        return interaction.reply({ content: `✅ Chave PIX definida como \`${key}\`! Os clientes receberão ela ao gerar pedidos.`, ephemeral: true });
       }
 
-      if (sub === 'criar_produto') {
+      if (sub === 'foto_loja') {
+        const url = interaction.options.getString('url_imagem').trim();
+        if (url.toLowerCase() === 'remover') {
+          await db.updateLicenseDetails(interaction.guildId, { storePhoto: null });
+          await refreshAllFixedPanels();
+          return interaction.reply({ content: '🗑️ Foto exclusiva removida.', ephemeral: true });
+        }
+        if (!isValidImageUrl(url)) return interaction.reply({ content: '❌ URL inválida.', ephemeral: true });
+        await db.updateLicenseDetails(interaction.guildId, { storePhoto: url });
+        await refreshAllFixedPanels();
+        return interaction.reply({ content: '✅ Foto exclusiva salva! Aparecerá apenas nas vitrines e painéis deste servidor.', ephemeral: true });
+      }
+
+      if (sub === 'canal_logs') {
+        const ch = interaction.options.getChannel('canal');
+        await db.updateLicenseDetails(interaction.guildId, { logsChannelId: ch.id });
+        return interaction.reply({ content: `✅ Canal de logs definido para <#${ch.id}>.`, ephemeral: true });
+      }
+
+      if (sub === 'manutencao') {
+        const ativo = interaction.options.getBoolean('ativo');
+        await db.updateLicenseDetails(interaction.guildId, { maintenance: ativo });
+        await refreshAllFixedPanels();
+        return interaction.reply({ content: ativo ? '🛠️ Modo manutenção ATIVADO.' : '🟢 Modo manutenção DESATIVADO.', ephemeral: true });
+      }
+
+      if (sub === 'criar_plano') {
         const nome = interaction.options.getString('nome').trim();
         const preco = interaction.options.getNumber('preco');
-        const desc = interaction.options.getString('descricao').trim();
-        const info = await db.addProduct(interaction.guildId, nome, desc, preco);
+        const dias = interaction.options.getInteger('dias');
+        const specs = interaction.options.getString('especificacoes').trim();
+        const info = await db.addProduct(interaction.guildId, nome, specs, preco, dias, specs);
+        await refreshAllFixedPanels();
         return interaction.reply({
           content:
-            `✅ Produto **${nome}** criado com sucesso!\n` +
-            `🆔 **ID do Produto:** **#${info.lastInsertRowid}**\n` +
-            `💵 **Preço:** R$ ${preco.toFixed(2)}`,
+            `✅ Plano **${nome}** criado!\n` +
+            `🆔 **ID do Plano:** **#${info.id}**\n` +
+            `💵 **Valor:** R$ ${preco.toFixed(2)} por **${dias} dia(s)**`,
           ephemeral: true
         });
       }
 
-      if (sub === 'add_estoque') {
-        const prodId = interaction.options.getInteger('id_produto');
-        const items = interaction.options.getString('itens').split(',').map(i => i.trim()).filter(Boolean);
-        if (!items.length) return interaction.reply({ content: '❌ Informe ao menos um item.', ephemeral: true });
-        const total = await db.addStock(prodId, interaction.guildId, items);
-        if (total === false) return interaction.reply({ content: `❌ Produto **#${prodId}** não encontrado.`, ephemeral: true });
-        return interaction.reply({ content: `📦 Estoque do produto **#${prodId}** atualizado! Total: **${total} unidade(s)**.`, ephemeral: true });
+      if (sub === 'criar_cupom') {
+        const codigo = interaction.options.getString('codigo').trim().toUpperCase();
+        const desconto = interaction.options.getInteger('desconto');
+        const c = await db.createCoupon(interaction.guildId, codigo, desconto);
+        return interaction.reply({ content: `🎟️ Cupom **${c.code}** (${c.discount_percent}% OFF) criado!`, ephemeral: true });
+      }
+
+      if (sub === 'aprovar_pedido') {
+        const orderCode = interaction.options.getString('codigo_pedido').trim().toUpperCase();
+        const accessInfo = interaction.options.getString('dados_acesso').trim();
+        const existing = await db.getOrderByCode(orderCode);
+        if (!existing || existing.guild_id !== interaction.guildId) {
+          return interaction.reply({ content: `❌ Pedido **${orderCode}** não encontrado nesta loja.`, ephemeral: true });
+        }
+
+        const result = await db.approveOrderAndCreateHosting(orderCode, accessInfo);
+        await db.logAudit(interaction.guildId, interaction.user.id, 'APROVAR_PEDIDO', `${orderCode} -> ${result.hosting.code}`);
+
+        await sendUserAlert(
+          result.order.customer_id,
+          `🎉 **Pagamento Confirmado & Hospedagem Ativa!**\n\n` +
+          `🏢 **Empresa:** ${license.store_name}\n` +
+          `🧾 **Pedido:** ${result.order.order_code}\n` +
+          `🆔 **ID da Hospedagem:** **${result.hosting.code}**\n` +
+          `📦 **Plano:** ${result.hosting.plan_name}\n` +
+          `⏳ **Vencimento:** ${formatDateBR(result.hosting.expires_at)} (${result.hosting.daysLeft}d)\n` +
+          `🔑 **Dados de Acesso:**\n\`\`\`${accessInfo}\`\`\``
+        );
+
+        await refreshAllFixedPanels();
+        return interaction.reply({
+          content: `✅ Pedido **${orderCode}** aprovado! Hospedagem **${result.hosting.code}** criada e enviada na DM de <@${result.order.customer_id}>.`,
+          ephemeral: true
+        });
+      }
+
+      if (sub === 'gerenciar_hospedagem') {
+        const hosCode = interaction.options.getString('codigo_hospedagem').trim().toUpperCase();
+        const acao = interaction.options.getString('acao');
+        const hos = await db.getHostingByCode(hosCode);
+        if (!hos || hos.guild_id !== interaction.guildId) {
+          return interaction.reply({ content: `❌ Hospedagem **${hosCode}** não encontrada nesta loja.`, ephemeral: true });
+        }
+
+        if (acao === 'renovar') {
+          const updated = await db.renewHosting(hosCode, 30);
+          await sendUserAlert(hos.customer_id, `✅ Sua hospedagem **${hosCode}** foi renovada por +30 dias! Novo vencimento: ${formatDateBR(updated.expires_at)}.`);
+          await refreshAllFixedPanels();
+          return interaction.reply({ content: `✅ **${hosCode}** renovada por +30 dias!`, ephemeral: true });
+        }
+        if (acao === 'suspender') {
+          await db.updateHostingStatus(hosCode, 'suspended');
+          await sendUserAlert(hos.customer_id, `🔴 Sua hospedagem **${hosCode}** foi suspensa pela administração.`);
+          await refreshAllFixedPanels();
+          return interaction.reply({ content: `🔒 **${hosCode}** suspensa.`, ephemeral: true });
+        }
+        if (acao === 'reativar') {
+          await db.updateHostingStatus(hosCode, 'active');
+          await sendUserAlert(hos.customer_id, `🟢 Sua hospedagem **${hosCode}** foi reativada!`);
+          await refreshAllFixedPanels();
+          return interaction.reply({ content: `🔓 **${hosCode}** reativada.`, ephemeral: true });
+        }
+        if (acao === 'excluir') {
+          await db.deleteHosting(hosCode);
+          await refreshAllFixedPanels();
+          return interaction.reply({ content: `🗑️ **${hosCode}** excluída.`, ephemeral: true });
+        }
       }
 
       if (sub === 'enviar_vitrine') {
-        const prodId = interaction.options.getInteger('id_produto');
+        const prodId = interaction.options.getInteger('id_plano');
         const prod = await db.getProduct(prodId, interaction.guildId);
-        if (!prod) return interaction.reply({ content: `❌ Produto **#${prodId}** não encontrado.`, ephemeral: true });
+        if (!prod) return interaction.reply({ content: `❌ Plano **#${prodId}** não encontrado.`, ephemeral: true });
 
-        const stockCount = JSON.parse(prod.stock || '[]').length;
         const embed = new EmbedBuilder()
-          .setTitle(`🛒 ${license.store_name} — ${prod.name}`)
-          .setDescription(prod.description)
+          .setTitle(`🖥️ ${license.store_name} — ${prod.name}`)
+          .setDescription(prod.specs || prod.description)
           .addFields(
             { name: '🆔 ID', value: `#${prod.id}`, inline: true },
             { name: '💵 Valor', value: `R$ ${Number(prod.price).toFixed(2)}`, inline: true },
-            { name: '📦 Estoque', value: `${stockCount} disponível(is)`, inline: true }
+            { name: '⏳ Ciclo', value: `${prod.duration_days || 30} dia(s)`, inline: true }
           )
           .setColor('#2ecc71')
-          .setFooter({ text: 'Entrega automática após confirmação do PIX' });
+          .setFooter({ text: 'Clique abaixo para contratar via PIX • Suporte e painel 24h' });
 
         if (license.store_photo && isValidImageUrl(license.store_photo)) {
           embed.setImage(license.store_photo);
         }
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`comprar_${prod.id}`).setLabel('Comprar via PIX').setStyle(ButtonStyle.Success)
+          new ButtonBuilder().setCustomId(`comprar_${prod.id}`).setLabel('Contratar Agora').setStyle(ButtonStyle.Success)
         );
 
         await interaction.channel.send({ embeds: [embed], components: [row] });
-        return interaction.reply({ content: `✅ Vitrine do produto **#${prod.id}** enviada neste canal!`, ephemeral: true });
+        return interaction.reply({ content: `✅ Vitrine do plano **#${prod.id}** enviada!`, ephemeral: true });
       }
     }
 
-    // COMANDO /PRODUTOS
+    // BOTÕES DO PAINEL FIXO DO DONO
+    if (interaction.isButton() && interaction.customId.startsWith('fp_')) {
+      if (interaction.customId === 'fp_refresh_owner') {
+        if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Exclusivo do dono.', ephemeral: true });
+        await interaction.update(await renderOwnerFixedPanel(interaction.guildId));
+        return;
+      }
+      if (interaction.customId === 'fp_owner_orders') {
+        if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Exclusivo do dono.', ephemeral: true });
+        const orders = (await db.getOrdersByGuild(interaction.guildId)).filter(o => o.status === 'pending');
+        const text = orders.map(o => `• **${o.order_code}** — <@${o.customer_id}> | **${o.plan_name}** | R$ ${Number(o.final_price).toFixed(2)}`).join('\n') || 'Nenhum pedido aguardando aprovação.';
+        return interaction.reply({
+          content: `⏳ **Pedidos Aguardando PIX:**\n${text}\n\n*Use \`/painel_dono aprovar_pedido\` para liberar.*`.slice(0, 1950),
+          ephemeral: true
+        });
+      }
+      if (interaction.customId === 'fp_owner_hostings') {
+        if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Exclusivo do dono.', ephemeral: true });
+        const hostings = await db.getHostingsByGuild(interaction.guildId);
+        const text = hostings.slice(0, 20).map(h => `• **${h.code}** — <@${h.customer_id}> | ${h.plan_name} | ${h.status === 'active' ? '🟢 Ativo' : '🔴 Suspenso'} (${h.daysLeft}d)`).join('\n') || 'Nenhuma hospedagem.';
+        return interaction.reply({ content: text.slice(0, 1950), ephemeral: true });
+      }
+    }
+
+    // /PRODUTOS (GERENCIAR PLANOS)
     if (interaction.isChatInputCommand() && interaction.commandName === 'produtos') {
-      if (interaction.user.id !== license.owner_id) {
-        return interaction.reply({ content: '⛔ Apenas o dono desta loja pode gerenciar os produtos.', ephemeral: true });
+      if (interaction.user.id !== license.owner_id && !isMaster) {
+        return interaction.reply({ content: '⛔ Apenas o dono pode gerenciar planos.', ephemeral: true });
       }
       const view = await buildProductsView(interaction.guildId);
       return interaction.reply({ embeds: [view.embed], components: view.components, ephemeral: true });
     }
 
-    // SELECT DE PRODUTO (/produtos)
     if (interaction.isStringSelectMenu() && interaction.customId === 'prod_select') {
-      if (interaction.user.id !== license.owner_id) {
-        return interaction.reply({ content: '⛔ Apenas o dono da loja pode alterar produtos.', ephemeral: true });
-      }
       const prodId = parseInt(interaction.values[0], 10);
       const prod = await db.getProduct(prodId, interaction.guildId);
-      if (!prod) return interaction.reply({ content: '❌ Produto não encontrado.', ephemeral: true });
+      if (!prod) return interaction.reply({ content: '❌ Plano não encontrado.', ephemeral: true });
 
-      const stockCount = JSON.parse(prod.stock || '[]').length;
       const embed = new EmbedBuilder()
-        .setTitle(`🛠️ Produto #${prod.id} — ${prod.name}`)
-        .setDescription(prod.description)
+        .setTitle(`🛠️ Plano #${prod.id} — ${prod.name}`)
+        .setDescription(prod.specs || prod.description)
         .addFields(
           { name: '🆔 ID', value: `#${prod.id}`, inline: true },
           { name: '💵 Preço', value: `R$ ${Number(prod.price).toFixed(2)}`, inline: true },
-          { name: '📦 Estoque', value: `${stockCount}`, inline: true }
+          { name: '⏳ Dias', value: `${prod.duration_days || 30}d`, inline: true }
         )
         .setColor('#e67e22');
 
@@ -553,156 +860,214 @@ client.on('interactionCreate', async (interaction) => {
         new ButtonBuilder().setCustomId(`prod_edit_${prod.id}`).setLabel('Editar').setStyle(ButtonStyle.Primary),
         new ButtonBuilder().setCustomId(`prod_del_${prod.id}`).setLabel('Remover').setStyle(ButtonStyle.Danger)
       );
-
       return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
     }
 
-    // BOTÃO EDITAR PRODUTO -> ABRE MODAL
     if (interaction.isButton() && interaction.customId.startsWith('prod_edit_')) {
-      if (interaction.user.id !== license.owner_id) {
-        return interaction.reply({ content: '⛔ Apenas o dono da loja pode editar produtos.', ephemeral: true });
-      }
       const prodId = parseInt(interaction.customId.replace('prod_edit_', ''), 10);
       const prod = await db.getProduct(prodId, interaction.guildId);
-      if (!prod) return interaction.reply({ content: '❌ Produto não encontrado.', ephemeral: true });
+      if (!prod) return interaction.reply({ content: '❌ Plano não encontrado.', ephemeral: true });
 
-      const modal = new ModalBuilder()
-        .setCustomId(`prod_modal_${prod.id}`)
-        .setTitle(`Editar Produto #${prod.id}`);
-
-      const nameInput = new TextInputBuilder()
-        .setCustomId('nome')
-        .setLabel('Nome do produto')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setValue(String(prod.name).slice(0, 100));
-
-      const priceInput = new TextInputBuilder()
-        .setCustomId('preco')
-        .setLabel('Preço em R$ (ex: 19.90)')
-        .setStyle(TextInputStyle.Short)
-        .setRequired(true)
-        .setValue(String(Number(prod.price)));
-
-      const descInput = new TextInputBuilder()
-        .setCustomId('descricao')
-        .setLabel('Descrição')
-        .setStyle(TextInputStyle.Paragraph)
-        .setRequired(true)
-        .setValue(String(prod.description).slice(0, 1000));
-
+      const modal = new ModalBuilder().setCustomId(`prod_modal_${prod.id}`).setTitle(`Editar Plano #${prod.id}`);
       modal.addComponents(
-        new ActionRowBuilder().addComponents(nameInput),
-        new ActionRowBuilder().addComponents(priceInput),
-        new ActionRowBuilder().addComponents(descInput)
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('nome').setLabel('Nome do plano').setStyle(TextInputStyle.Short).setRequired(true).setValue(String(prod.name).slice(0, 100))),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('preco').setLabel('Preço em R$').setStyle(TextInputStyle.Short).setRequired(true).setValue(String(Number(prod.price)))),
+        new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('specs').setLabel('Especificações / Descrição').setStyle(TextInputStyle.Paragraph).setRequired(true).setValue(String(prod.specs || prod.description).slice(0, 1000)))
       );
-
       return interaction.showModal(modal);
     }
 
-    // SUBMISSÃO DO MODAL DE EDIÇÃO
     if (interaction.isModalSubmit() && interaction.customId.startsWith('prod_modal_')) {
-      if (interaction.user.id !== license.owner_id) {
-        return interaction.reply({ content: '⛔ Apenas o dono da loja pode editar produtos.', ephemeral: true });
-      }
       const prodId = parseInt(interaction.customId.replace('prod_modal_', ''), 10);
       const nome = interaction.fields.getTextInputValue('nome').trim();
-      const precoRaw = interaction.fields.getTextInputValue('preco').replace(',', '.').trim();
-      const preco = Number(precoRaw);
-      const descricao = interaction.fields.getTextInputValue('descricao').trim();
+      const preco = Number(interaction.fields.getTextInputValue('preco').replace(',', '.').trim());
+      const specs = interaction.fields.getTextInputValue('specs').trim();
+      if (Number.isNaN(preco) || preco <= 0) return interaction.reply({ content: '❌ Preço inválido.', ephemeral: true });
 
-      if (Number.isNaN(preco) || preco <= 0) {
-        return interaction.reply({ content: '❌ Preço inválido.', ephemeral: true });
-      }
-
-      const updated = await db.updateProduct(prodId, interaction.guildId, { name: nome, price: preco, description: descricao });
-      if (!updated) return interaction.reply({ content: '❌ Produto não encontrado.', ephemeral: true });
-
-      return interaction.reply({
-        content: `✅ Produto **#${updated.id}** (**${updated.name}**) atualizado para **R$ ${Number(updated.price).toFixed(2)}**!`,
-        ephemeral: true
-      });
+      const updated = await db.updateProduct(prodId, interaction.guildId, { name: nome, price: preco, description: specs, specs });
+      await refreshAllFixedPanels();
+      return interaction.reply({ content: `✅ Plano **#${updated.id}** (**${updated.name}**) atualizado!`, ephemeral: true });
     }
 
-    // BOTÃO REMOVER PRODUTO
     if (interaction.isButton() && interaction.customId.startsWith('prod_del_')) {
-      if (interaction.user.id !== license.owner_id) {
-        return interaction.reply({ content: '⛔ Apenas o dono da loja pode remover produtos.', ephemeral: true });
-      }
       const prodId = parseInt(interaction.customId.replace('prod_del_', ''), 10);
       const ok = await db.deleteProduct(prodId, interaction.guildId);
-      if (!ok) return interaction.reply({ content: '❌ Produto não encontrado ou já removido.', ephemeral: true });
+      await refreshAllFixedPanels();
+      return interaction.reply({ content: ok ? `🗑️ Plano **#${prodId}** removido!` : '❌ Não encontrado.', ephemeral: true });
+    }
 
-      return interaction.reply({
-        content: `🗑️ Produto **#${prodId}** removido com sucesso!`,
-        ephemeral: true
+    // COMANDOS DO CLIENTE FINAL: /PAINEL, /LOJA, /MINHAS_HOSPEDAGENS, /SUPORTE
+    if (interaction.isChatInputCommand() && interaction.commandName === 'painel') {
+      const payload = await renderCustomerFixedPanel(interaction.guildId, interaction.user.id);
+      const msg = await interaction.channel.send(payload);
+      await db.registerFixedPanel('customer', interaction.guildId, interaction.user.id, interaction.channelId, msg.id);
+      return interaction.reply({ content: '✅ Seu painel fixo de hospedagem foi aberto neste canal e atualiza automaticamente 24h!', ephemeral: true });
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === 'loja') {
+      const products = await db.getProductsByGuild(interaction.guildId);
+      if (!products.length) return interaction.reply({ content: '📭 Nenhum plano disponível no momento.', ephemeral: true });
+
+      const desc = products.map(p => `• **#${p.id} — ${p.name}** (**R$ ${Number(p.price).toFixed(2)}** / ${p.duration_days || 30}d)\n  ${p.specs || p.description}`).join('\n\n');
+      const embed = new EmbedBuilder().setTitle(`🛒 Catálogo de Hospedagens — ${license.store_name}`).setDescription(desc.slice(0, 4000)).setColor('#2ecc71');
+      if (license.store_photo && isValidImageUrl(license.store_photo)) embed.setThumbnail(license.store_photo);
+
+      const options = products.slice(0, 25).map(p => ({
+        label: `${p.name} - R$ ${Number(p.price).toFixed(2)}`.slice(0, 100),
+        description: `${p.duration_days || 30} dias`.slice(0, 100),
+        value: String(p.id)
+      }));
+
+      const row = new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder().setCustomId('loja_select_plan').setPlaceholder('Selecione um plano para contratar...').addOptions(options)
+      );
+      return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === 'minhas_hospedagens') {
+      const list = await db.getHostingsByCustomer(interaction.user.id, interaction.guildId);
+      if (!list.length) return interaction.reply({ content: '📭 Você ainda não possui hospedagens ativas neste servidor.', ephemeral: true });
+      const text = list.map(h =>
+        `• **${h.code}** — **${h.plan_name}** | ${h.status === 'active' ? '🟢 Ativo' : '🔴 Suspenso'} | Vence em **${formatDateBR(h.expires_at)}** (${h.daysLeft}d)`
+      ).join('\n');
+      return interaction.reply({ embeds: [new EmbedBuilder().setTitle('🖥️ Minhas Hospedagens').setDescription(text.slice(0, 4000)).setColor('#3498db')], ephemeral: true });
+    }
+
+    if (interaction.isChatInputCommand() && interaction.commandName === 'suporte') {
+      const cat = interaction.options.getString('categoria');
+      const channelName = `ticket-${cat}-${interaction.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 30);
+      const ticketChannel = await interaction.guild.channels.create({
+        name: channelName,
+        type: ChannelType.GuildText,
+        permissionOverwrites: [
+          { id: interaction.guild.id, deny: [PermissionFlagsBits.ViewChannel] },
+          { id: interaction.user.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] },
+          { id: license.owner_id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages] }
+        ]
       });
+
+      const closeRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('close_ticket').setLabel('Fechar Ticket').setStyle(ButtonStyle.Danger)
+      );
+
+      await ticketChannel.send({
+        content: `🎫 **Ticket de Atendimento (${cat.toUpperCase()})**\nCliente: <@${interaction.user.id}> • Responsável: <@${license.owner_id}>`,
+        components: [closeRow]
+      });
+      return interaction.reply({ content: `✅ Ticket aberto em <#${ticketChannel.id}>!`, ephemeral: true });
     }
 
-    // COMPRAR VIA PIX
-    if (interaction.isButton() && interaction.customId.startsWith('comprar_')) {
-      const prodId = parseInt(interaction.customId.split('_')[1], 10);
-      const prod = await db.getProduct(prodId, interaction.guildId);
-      if (!prod) return interaction.reply({ content: '❌ Produto indisponível.', ephemeral: true });
-      if (!JSON.parse(prod.stock || '[]').length) return interaction.reply({ content: '❌ Sem estoque.', ephemeral: true });
-      if (!license.mp_token) return interaction.reply({ content: '⚠️ PIX não configurado pelo dono.', ephemeral: true });
+    if (interaction.isButton() && interaction.customId === 'close_ticket') {
+      await interaction.reply({ content: '🔒 Fechando ticket em 3 segundos...' });
+      setTimeout(() => interaction.channel.delete().catch(() => {}), 3000);
+      return;
+    }
 
-      await interaction.deferReply({ ephemeral: true });
-      try {
-        const res = await getMP(license.mp_token).create({
-          body: {
-            transaction_amount: Number(prod.price),
-            description: `${license.store_name} - ${prod.name}`,
-            payment_method_id: 'pix',
-            payer: { email: `cliente_${interaction.user.id}@vendasbot.com` }
-          }
+    // BOTÕES DO PAINEL FIXO DO CLIENTE
+    if (interaction.isButton() && interaction.customId.startsWith('fp_cust_')) {
+      const parts = interaction.customId.split('_');
+      const action = parts[2];
+      const ownerOfPanel = parts[3];
+
+      if (interaction.user.id !== ownerOfPanel && interaction.user.id !== license.owner_id && !isMaster) {
+        return interaction.reply({ content: '⛔ Este painel pertence a outro cliente.', ephemeral: true });
+      }
+
+      if (action === 'refresh') {
+        await interaction.update(await renderCustomerFixedPanel(interaction.guildId, ownerOfPanel));
+        return;
+      }
+
+      if (action === 'invoices') {
+        const orders = await db.getOrdersByCustomer(ownerOfPanel, interaction.guildId);
+        const text = orders.slice(0, 15).map(o =>
+          `• **${o.order_code}** — ${o.plan_name} | R$ ${Number(o.final_price).toFixed(2)} | Status: **${o.status.toUpperCase()}**`
+        ).join('\n') || 'Nenhuma fatura encontrada.';
+        return interaction.reply({ content: `🧾 **Histórico de Faturas:**\n${text}`.slice(0, 1950), ephemeral: true });
+      }
+
+      if (action === 'renew') {
+        const products = await db.getProductsByGuild(interaction.guildId);
+        if (!products.length) return interaction.reply({ content: '❌ Nenhum plano cadastrado para renovação.', ephemeral: true });
+        const prod = products[0];
+        const order = await db.createOrder(interaction.guildId, ownerOfPanel, prod);
+        await refreshAllFixedPanels();
+        return interaction.reply({
+          content:
+            `🔄 **Pedido de Renovação Gerado: ${order.order_code}**\n` +
+            `💵 **Valor:** R$ ${Number(order.final_price).toFixed(2)}\n` +
+            `💠 **Chave PIX:** ${license.pix_key ? `\`${license.pix_key}\`` : 'Solicite ao dono no ticket'}\n` +
+            `*Após realizar o PIX, envie o comprovante para <@${license.owner_id}> liberar sua renovação!*`,
+          ephemeral: true
         });
-        const pix = res.point_of_interaction.transaction_data.qr_code;
-        const embed = new EmbedBuilder()
-          .setTitle(`💠 PIX — ${prod.name}`)
-          .setDescription(`Valor: **R$ ${Number(prod.price).toFixed(2)}**\n\n\`\`\`${pix}\`\`\`\nApós pagar, clique em **Verificar Pagamento**.`)
-          .setColor('#00b0f4');
+      }
 
-        if (license.store_photo && isValidImageUrl(license.store_photo)) {
-          embed.setThumbnail(license.store_photo);
-        }
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`verificar_${res.id}_${prod.id}`).setLabel('Verificar Pagamento').setStyle(ButtonStyle.Primary)
-        );
-        await interaction.editReply({ embeds: [embed], components: [row] });
-      } catch (err) {
-        console.error('❌ Erro PIX:', err);
-        await interaction.editReply({ content: '❌ Erro ao gerar PIX. Confira o Token do Mercado Pago.' });
+      if (action === 'support') {
+        return interaction.reply({ content: '🎫 Use `/suporte` para abrir um canal privado de atendimento com a equipe!', ephemeral: true });
       }
     }
 
-    // VERIFICAR PAGAMENTO PIX
-    if (interaction.isButton() && interaction.customId.startsWith('verificar_')) {
-      const [, paymentId, prodIdStr] = interaction.customId.split('_');
-      const prodId = parseInt(prodIdStr, 10);
+    // CONTRATAÇÃO DE PLANO (VITRINE OU /LOJA) -> ABRE MODAL DE CUPOM OPCIONAL E GERA PEDIDO PIX MANUAL
+    if ((interaction.isButton() && interaction.customId.startsWith('comprar_')) || (interaction.isStringSelectMenu() && interaction.customId === 'loja_select_plan')) {
+      const prodId = interaction.isButton() ? parseInt(interaction.customId.split('_')[1], 10) : parseInt(interaction.values[0], 10);
+      const prod = await db.getProduct(prodId, interaction.guildId);
+      if (!prod) return interaction.reply({ content: '❌ Plano indisponível.', ephemeral: true });
 
-      await interaction.deferReply({ ephemeral: true });
-      try {
-        const statusRes = await getMP(license.mp_token).get({ id: paymentId });
-        if (statusRes.status === 'approved') {
-          const item = await db.popStockItem(prodId, interaction.guildId);
-          if (!item) {
-            return interaction.editReply({ content: `⚠️ Pago, mas o estoque acabou. Comprovante: ${paymentId}` });
-          }
-          try {
-            await interaction.user.send(`🎉 **Compra Aprovada — ${license.store_name}!**\n\n📦 **Produto:**\n\`\`\`${item}\`\`\``);
-            await interaction.editReply({ content: '✅ Pagamento aprovado! Produto enviado na sua DM.' });
-          } catch {
-            await interaction.editReply({ content: `✅ Pagamento aprovado! Sua DM estava fechada:\n\`\`\`${item}\`\`\`` });
-          }
-        } else {
-          await interaction.editReply({ content: `⏳ Status atual: **${statusRes.status}**. Tente novamente em instantes.` });
+      const modal = new ModalBuilder().setCustomId(`checkout_modal_${prod.id}`).setTitle(`Contratar: ${String(prod.name).slice(0, 32)}`);
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId('cupom')
+            .setLabel('Cupom de desconto (opcional)')
+            .setStyle(TextInputStyle.Short)
+            .setRequired(false)
+            .setPlaceholder('Ex: PROMO10')
+        )
+      );
+      return interaction.showModal(modal);
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId.startsWith('checkout_modal_')) {
+      const prodId = parseInt(interaction.customId.replace('checkout_modal_', ''), 10);
+      const prod = await db.getProduct(prodId, interaction.guildId);
+      if (!prod) return interaction.reply({ content: '❌ Plano não encontrado.', ephemeral: true });
+
+      const cupom = interaction.fields.getTextInputValue('cupom')?.trim() || null;
+      const order = await db.createOrder(interaction.guildId, interaction.user.id, prod, cupom);
+
+      // Notifica o dono da loja que chegou um pedido PIX novo
+      await sendUserAlert(
+        license.owner_id,
+        `🔔 **Novo Pedido Gerado — ${license.store_name}**\n` +
+        `• **Pedido:** **${order.order_code}**\n` +
+        `• **Cliente:** <@${interaction.user.id}> (\`${interaction.user.id}\`)\n` +
+        `• **Plano:** ${order.plan_name} (${order.duration_days}d)\n` +
+        `• **Valor:** R$ ${Number(order.final_price).toFixed(2)}\n` +
+        `Use \`/painel_dono aprovar_pedido codigo_pedido:${order.order_code}\` ou aprove no **Site Oficial** após receber o PIX.`
+      );
+
+      if (license.logs_channel_id) {
+        const logCh = interaction.guild.channels.cache.get(license.logs_channel_id);
+        if (logCh && logCh.isTextBased()) {
+          await logCh.send(`🧾 Novo pedido **${order.order_code}** de <@${interaction.user.id}> — **${order.plan_name}** (R$ ${Number(order.final_price).toFixed(2)})`).catch(() => {});
         }
-      } catch (err) {
-        console.error('❌ Erro ao verificar pagamento:', err);
-        await interaction.editReply({ content: '❌ Erro ao consultar pagamento.' });
       }
+
+      await refreshAllFixedPanels();
+
+      const embed = new EmbedBuilder()
+        .setTitle(`🧾 Pedido Criado — ${order.order_code}`)
+        .setDescription(
+          `Seu pedido foi registrado! Efetue o pagamento via **PIX** abaixo e envie o comprovante para a equipe liberar sua hospedagem.\n\n` +
+          `💠 **Chave PIX:** ${license.pix_key ? `\`${license.pix_key}\`` : `Solicite a chave PIX a <@${license.owner_id}>`}\n` +
+          `💵 **Valor a Pagar:** **R$ ${Number(order.final_price).toFixed(2)}**${order.coupon_code ? ` (Cupom \`${order.coupon_code}\` aplicado!)` : ''}\n` +
+          `📦 **Plano:** ${order.plan_name} (**${order.duration_days} dia(s)**)\n` +
+          `🆔 **Código do Pedido:** \`${order.order_code}\``
+        )
+        .setColor('#00b0f4')
+        .setFooter({ text: 'Assim que o PIX for conferido, sua hospedagem será ativada e enviada na sua DM.' });
+
+      return interaction.reply({ embeds: [embed], ephemeral: true });
     }
   } catch (err) {
     console.error('❌ Erro na interação:', err);
@@ -719,4 +1084,4 @@ async function startBot() {
   await client.login(token);
 }
 
-module.exports = { startBot, client, notifyLicenseActivated };
+module.exports = { startBot, client, notifyLicenseActivated, refreshAllFixedPanels };
