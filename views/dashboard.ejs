@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <title>Painel Master — Aluguéis & Licenças</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 20px; }
+    .container { max-width: 1100px; margin: auto; }
+    .header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 15px; }
+    .card { background: #1e293b; padding: 20px; border-radius: 8px; margin-top: 20px; }
+    input { padding: 8px; border-radius: 5px; border: 1px solid #475569; background: #0f172a; color: #fff; margin-right: 8px; }
+    button { padding: 8px 14px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; }
+    .btn-green { background: #22c55e; color: #fff; }
+    .btn-red { background: #ef4444; color: #fff; }
+    .btn-blue { background: #3b82f6; color: #fff; }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+    th, td { padding: 12px; text-align: left; border-bottom: 1px solid #334155; }
+    .badge-on { background: #16a34a; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+    .badge-off { background: #dc2626; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>⚡ Painel Master — Controle em Tempo Real</h1>
+      <a href="/logout" style="color: #94a3b8;">Sair</a>
+    </div>
+
+    <div class="card">
+      <h3>➕ Ativar Nova Loja / Aluguel</h3>
+      <form method="POST" action="/ativar">
+        <input type="text" name="guild_id" placeholder="ID do Servidor" required />
+        <input type="text" name="owner_id" placeholder="ID Conta do Dono" required />
+        <input type="text" name="store_name" placeholder="Nome da Loja" required />
+        <input type="number" name="days" placeholder="Dias (ex: 30)" value="30" required style="width: 110px;" />
+        <button type="submit" class="btn-green">Ativar Agora</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3>📋 Lojas Alugadas (<%= licenses.length %>)</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Loja</th>
+            <th>ID Servidor</th>
+            <th>ID Dono</th>
+            <th>Status</th>
+            <th>Dias Restantes</th>
+            <th>Ações Imediatas</th>
+          </tr>
+        </thead>
+        <tbody>
+          <% licenses.forEach(lic => { %>
+            <tr>
+              <td><strong><%= lic.store_name %></strong></td>
+              <td><code><%= lic.guild_id %></code></td>
+              <td><code><%= lic.owner_id %></code></td>
+              <td>
+                <% if (lic.active && !lic.isExpired) { %>
+                  <span class="badge-on">ATIVO</span>
+                <% } else { %>
+                  <span class="badge-off">BLOQUEADO / VENCIDO</span>
+                <% } %>
+              </td>
+              <td><strong><%= lic.daysLeft %> dias</strong></td>
+              <td style="display: flex; gap: 6px;">
+                <% if (lic.active) { %>
+                  <form method="POST" action="/bloquear/<%= lic.guild_id %>">
+                    <button type="submit" class="btn-red">Bloquear</button>
+                  </form>
+                <% } else { %>
+                  <form method="POST" action="/desbloquear/<%= lic.guild_id %>">
+                    <button type="submit" class="btn-green">Desbloquear</button>
+                  </form>
+                <% } %>
+
+                <form method="POST" action="/renovar/<%= lic.guild_id %>">
+                  <input type="hidden" name="extra_days" value="30" />
+                  <button type="submit" class="btn-blue">+30d</button>
+                </form>
+
+                <form method="POST" action="/remover/<%= lic.guild_id %>" onsubmit="return confirm('Remover esta loja permanentemente?')">
+                  <button type="submit" class="btn-red">Excluir</button>
+                </form>
+              </td>
+            </tr>
+          <% }) %>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>
