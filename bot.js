@@ -24,6 +24,7 @@ const client = new Client({
 });
 
 client.on('error', (err) => console.error('❌ Erro no client:', err));
+client.on('shardError', (err) => console.error('❌ Erro de shard/WebSocket:', err));
 
 client.on('guildCreate', async (guild) => {
   try {
@@ -82,12 +83,18 @@ async function registerCommands() {
   }
 }
 
-client.once('clientReady', async () => {
+let readyHandled = false;
+async function onBotReady() {
+  if (readyHandled) return;
+  readyHandled = true;
   console.log(`✅ Bot online como ${client.user.tag}`);
   if (process.env.REGISTER_COMMANDS === 'true') {
     await registerCommands();
   }
-});
+}
+
+client.once('ready', onBotReady);
+client.once('clientReady', onBotReady);
 
 const getMP = (token) => new Payment(new MercadoPagoConfig({ accessToken: token }));
 
@@ -259,6 +266,7 @@ client.on('interactionCreate', async (interaction) => {
 
 async function startBot() {
   const token = process.env.DISCORD_TOKEN?.trim();
+  console.log('🔄 Tentando logar no Discord... Token existe?', Boolean(token), 'Tamanho:', token?.length || 0);
   if (!token) throw new Error('DISCORD_TOKEN ausente.');
   await client.login(token);
 }
