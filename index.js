@@ -14,6 +14,20 @@ const { startWeb } = require('./web');
   } catch (err) {
     console.error('❌ Falha ao iniciar banco Turso:', err);
   }
+const { initDB } = require('./database');
+const { startWeb } = require('./web');
+const { startBot } = require('./bot');
+
+async function main() {
+  await initDB();
+  startWeb();
+  await startBot();
+}
+
+main().catch((err) => {
+  console.error('❌ Erro fatal na inicialização:', err);
+  process.exit(1);
+});
 
   // 3. Inicia o bot do Discord
   try {
