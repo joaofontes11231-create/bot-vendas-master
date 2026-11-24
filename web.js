@@ -222,13 +222,17 @@ app.post('/webhooks/mercadopago', async (req, res) => {
       console.error('Pagamento Mercado Pago divergente para pedido:', orderCode);
       return res.status(409).send('Valor ou moeda divergente.');
     }
+    const paymentStatus = String(payment.status || 'unknown');
     if (order.status === 'approved' && String(order.mp_payment_id) === String(payment.id)) {
-      await db.enqueuePaymentNotification(orderCode);
+      await db.updateApprovedMercadoPagoPaymentStatus(orderCode, payment.id, paymentStatus);
+      if (['refunded', 'charged_back', 'cancelled'].includes(paymentStatus)) {
+        await db.logAudit(order.guild_id, 'MERCADO_PAGO', 'STATUS_PAGAMENTO_' + paymentStatus.toUpperCase(), orderCode + ' / ' + String(payment.id));
+      }
       return res.sendStatus(200);
     }
     if (order.status !== 'pending') return res.sendStatus(200);
 
-    const paymentStatus = String(payment.status || 'unknown');
+
     const recorded = await db.markOrderMercadoPagoPayment(orderCode, payment.id, paymentStatus);
     if (!recorded) {
       const latest = await db.getOrderByCode(orderCode);
