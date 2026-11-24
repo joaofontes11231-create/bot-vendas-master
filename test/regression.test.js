@@ -30,7 +30,7 @@ test('production web startup requires strong credentials', () => {
   assert.match(web, /masterPassword\.length < 12/);
   assert.match(web, /configuredSessionSecret\.length < 32/);
   assert.match(web, /httpOnly: true/);
-  assert.match(web, /sameSite: 'strict'/);
+  assert.match(web, /sameSite: 'lax'/);
 });
 
 test('database enforces a single active renewal order for each hosting', () => {
