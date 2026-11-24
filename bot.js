@@ -1250,7 +1250,7 @@ async function startBot() {
   const masterId = process.env.MASTER_ID?.trim();
   const clientId = process.env.CLIENT_ID?.trim();
   if (!token) throw new Error('DISCORD_TOKEN ausente.');
-  if (!masterId || !/^\\d{17,20}$/.test(masterId)) throw new Error('MASTER_ID ausente ou inválido.');
+  if (!masterId || !/^\d{17,20}$/.test(masterId)) throw new Error('MASTER_ID ausente ou inválido.');
   if (process.env.REGISTER_COMMANDS === 'true' && !clientId) throw new Error('CLIENT_ID é obrigatório quando REGISTER_COMMANDS=true.');
   console.log('🔄 Tentando conectar ao Discord...');
   await client.login(token);
