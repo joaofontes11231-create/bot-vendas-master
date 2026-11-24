@@ -198,14 +198,20 @@ app.post('/webhooks/mercadopago', async (req, res) => {
     if (!connection) return res.sendStatus(200);
     const accessToken = await mp.refreshSellerToken(connection, db);
     const payment = await mp.fetchPayment(dataId, accessToken);
-    if (String(payment.collector_id) !== String(connection.mp_user_id)) {
-      return res.status(403).send('Conta recebedora não corresponde à loja.');
+    if (String(payment.id) !== String(dataId) ||
+        String(payment.collector_id) !== String(connection.mp_user_id)) {
+      return res.status(403).send('Pagamento ou conta recebedora não corresponde à loja.');
+    }
+    const expectedLiveMode = String(process.env.MP_MODE || 'production').toLowerCase() === 'production';
+    if (Boolean(payment.live_mode) !== expectedLiveMode) {
+      return res.status(403).send('Ambiente do pagamento não corresponde à configuração.');
     }
     const orderCode = String(payment.external_reference || '').trim().toUpperCase();
     if (!/^PED-[A-Z0-9-]{1,32}$/.test(orderCode)) return res.sendStatus(200);
     const order = await db.getOrderByCode(orderCode);
     if (!order || String(order.guild_id) !== String(connection.guild_id) ||
-        order.payment_provider !== 'mercadopago') {
+        order.payment_provider !== 'mercadopago' ||
+        (order.mp_preference_id && String(payment.preference_id) !== String(order.mp_preference_id))) {
       return res.sendStatus(200);
     }
     const paidAmount = Number(payment.transaction_amount);
