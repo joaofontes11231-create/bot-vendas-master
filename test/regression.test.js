@@ -57,7 +57,7 @@ test('APP_ROLE gates the web and bot services independently', () => {
 test('environment template contains variable names but no populated secrets', () => {
   const env = read('.env.example');
   const safeDefaults = new Set(['APP_ROLE=all', 'REGISTER_COMMANDS=false', 'NODE_ENV=production', 'PORT=8080', 'MP_MODE=production']);
-  for (const line of env.split(/\\r?\\n/)) {
+  for (const line of env.split('\n')) {
     if (!line || line.startsWith('#')) continue;
     assert.ok(/^[A-Z0-9_]+=$/.test(line) || safeDefaults.has(line), 'Unexpected populated environment value: ' + line);
   }
