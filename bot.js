@@ -537,6 +537,38 @@ async function registerCommands() {
 }
 
 let readyHandled = false;
+let processingPaymentOutbox = false;
+
+async function processPaymentOutbox() {
+  if (processingPaymentOutbox || !client.isReady()) return;
+  processingPaymentOutbox = true;
+  try {
+    const pending = await db.getPendingPaymentNotifications(20);
+    for (const item of pending) {
+      try {
+        const order = await db.getOrderByCode(item.order_code);
+        if (!order || order.status !== 'approved' || !order.hosting_code) continue;
+        const hosting = await db.getHostingByCode(order.hosting_code);
+        if (!hosting) continue;
+        const license = await db.getLicense(order.guild_id);
+        await notifyOrderApproved({
+          order,
+          hosting,
+          alreadyApproved: false,
+          renewed: Boolean(order.renewal_hosting_code)
+        }, license?.store_name || 'Loja');
+        await db.markPaymentNotificationProcessed(order.order_code);
+      } catch (err) {
+        console.error('Falha ao entregar notificação de pagamento:', item.order_code, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('Falha ao consultar fila de notificações de pagamento:', err.message);
+  } finally {
+    processingPaymentOutbox = false;
+  }
+}
+
 async function onBotReady() {
   if (readyHandled) return;
   readyHandled = true;
@@ -546,6 +578,8 @@ async function onBotReady() {
   }
   await runScheduledChecks();
   setInterval(runScheduledChecks, 5 * 60 * 1000);
+  await processPaymentOutbox();
+  setInterval(processPaymentOutbox, 15 * 1000);
 }
 
 client.once('clientReady', onBotReady);
