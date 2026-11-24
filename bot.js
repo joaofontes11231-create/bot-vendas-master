@@ -740,6 +740,13 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
+    if (interaction.isButton() && interaction.customId.startsWith('rate_')) {
+      const stars = Number(interaction.customId.slice('rate_'.length));
+      if (!Number.isInteger(stars) || stars < 1 || stars > 5) return interaction.reply({ content: '❌ Avaliação inválida.', ephemeral: true });
+      await db.addReview('global', interaction.user.id, stars);
+      return interaction.reply({ content: '✅ Obrigado pela sua avaliação de **' + stars + ' estrela(s)**!', ephemeral: true });
+    }
+
     if (!interaction.guildId) return;
     const license = await db.getLicense(interaction.guildId);
 
@@ -988,6 +995,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu() && interaction.customId === 'prod_select') {
+      if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Apenas o dono da loja pode editar planos.', ephemeral: true });
       const prodId = parseInt(interaction.values[0], 10);
       const prod = await db.getProduct(prodId, interaction.guildId);
       if (!prod) return interaction.reply({ content: '❌ Plano não encontrado.', ephemeral: true });
@@ -1010,6 +1018,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('prod_edit_')) {
+      if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Apenas o dono da loja pode editar planos.', ephemeral: true });
       const prodId = parseInt(interaction.customId.replace('prod_edit_', ''), 10);
       const prod = await db.getProduct(prodId, interaction.guildId);
       if (!prod) return interaction.reply({ content: '❌ Plano não encontrado.', ephemeral: true });
@@ -1024,6 +1033,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isModalSubmit() && interaction.customId.startsWith('prod_modal_')) {
+      if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Apenas o dono da loja pode editar planos.', ephemeral: true });
       const prodId = parseInt(interaction.customId.replace('prod_modal_', ''), 10);
       const nome = interaction.fields.getTextInputValue('nome').trim();
       const preco = Number(interaction.fields.getTextInputValue('preco').replace(',', '.').trim());
@@ -1036,6 +1046,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('prod_del_')) {
+      if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Apenas o dono da loja pode remover planos.', ephemeral: true });
       const prodId = parseInt(interaction.customId.replace('prod_del_', ''), 10);
       const ok = await db.deleteProduct(prodId, interaction.guildId);
       await refreshAllFixedPanels();
@@ -1097,13 +1108,6 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply({ content: '🔒 Fechando ticket em 3 segundos...' });
       setTimeout(() => interaction.channel.delete().catch(() => {}), 3000);
       return;
-    }
-
-    if (interaction.isButton() && interaction.customId.startsWith('rate_')) {
-      const stars = Number(interaction.customId.replace('rate_', ''));
-      await db.addReview(interaction.guildId || 'global', interaction.user.id, stars);
-      await refreshAllFixedPanels();
-      return interaction.reply({ content: `✅ Obrigado pela sua avaliação de **${stars} estrela(s)**!`, ephemeral: true });
     }
 
     // BOTÕES DO PAINEL FIXO DO CLIENTE
