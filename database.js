@@ -151,9 +151,14 @@ async function initDB() {
       status TEXT NOT NULL DEFAULT 'active',
       access_info TEXT NOT NULL DEFAULT '',
       created_at INTEGER NOT NULL,
-      expires_at INTEGER NOT NULL
+      expires_at INTEGER NOT NULL,
+      source_order_id INTEGER
     )
   `);
+
+  await ensureColumn(client, 'hostings', 'source_order_id', 'INTEGER');
+  await ensureColumn(client, 'hostings', 'last_renewal_order_id', 'INTEGER');
+  await client.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_hostings_source_order ON hostings(source_order_id) WHERE source_order_id IS NOT NULL');
 
   await client.execute(`
     CREATE TABLE IF NOT EXISTS coupons (
@@ -204,6 +209,33 @@ async function initDB() {
       created_at INTEGER NOT NULL
     )
   `);
+
+  // Recupera pedidos que foram interrompidos durante a entrega/renovação.
+  await client.execute({
+    sql: `UPDATE orders
+      SET status = 'approved',
+          hosting_code = (SELECT h.code FROM hostings h WHERE h.source_order_id = orders.id),
+          approved_at = COALESCE(approved_at, ?)
+      WHERE status = 'processing'
+        AND renewal_hosting_code IS NULL
+        AND EXISTS (SELECT 1 FROM hostings h WHERE h.source_order_id = orders.id)`,
+    args: [Date.now()]
+  });
+  await client.execute({
+    sql: `UPDATE orders
+      SET status = 'approved',
+          hosting_code = renewal_hosting_code,
+          approved_at = COALESCE(approved_at, ?)
+      WHERE status = 'processing'
+        AND renewal_hosting_code IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM hostings h
+          WHERE h.code = orders.renewal_hosting_code
+            AND h.last_renewal_order_id = orders.id
+        )`,
+    args: [Date.now()]
+  });
+  await client.execute("UPDATE orders SET status = 'pending' WHERE status = 'processing'");
 
   await client.execute('SELECT 1');
   console.log('✅ Banco Turso conectado (Pacote Pro).');
@@ -561,52 +593,83 @@ async function approveOrderAndCreateHosting(orderCode, accessInfo = 'Liberado pe
   }
   if (order.status !== 'pending') return null;
 
-  if (order.renewal_hosting_code) {
-    const currentHosting = await getHostingByCode(order.renewal_hosting_code);
-    if (
-      !currentHosting ||
-      currentHosting.guild_id !== String(order.guild_id) ||
-      currentHosting.customer_id !== String(order.customer_id)
-    ) {
-      return null;
+  const claim = await client.execute({
+    sql: "UPDATE orders SET status = 'processing' WHERE id = ? AND status = 'pending'",
+    args: [Number(order.id)]
+  });
+  if (Number(claim.rowsAffected || 0) !== 1) {
+    const latest = await getOrderByCode(orderCode);
+    if (latest?.status === 'approved' && latest.hosting_code) {
+      return { order: latest, hosting: await getHostingByCode(latest.hosting_code), alreadyApproved: true };
     }
-
-    const renewedHosting = await renewHosting(
-      order.renewal_hosting_code,
-      Number(order.duration_days || 30)
-    );
-    if (!renewedHosting) return null;
-
-    await client.execute({
-      sql: "UPDATE orders SET status = 'approved', hosting_code = ?, approved_at = ? WHERE id = ? AND status = 'pending'",
-      args: [renewedHosting.code, Date.now(), Number(order.id)]
-    });
-
-    const updatedOrder = await getOrderByCode(orderCode);
-    return { order: updatedOrder, hosting: renewedHosting, alreadyApproved: false, renewed: true };
+    return null;
   }
 
-  const product = await getProduct(order.product_id, order.guild_id);
-  const now = Date.now();
-  const expiresAt = now + Number(order.duration_days || 30) * 24 * 60 * 60 * 1000;
-  const tempHos = `HOS-TMP-${randomBytes(8).toString('hex')}`;
+  try {
+    if (order.renewal_hosting_code) {
+      const current = await getHostingByCode(order.renewal_hosting_code);
+      if (!current || current.guild_id !== String(order.guild_id) || current.customer_id !== String(order.customer_id)) {
+        await client.execute({ sql: "UPDATE orders SET status = 'pending' WHERE id = ? AND status = 'processing'", args: [Number(order.id)] });
+        return null;
+      }
+      const now = Date.now();
+      const durationMs = Math.max(1, Number(order.duration_days) || 30) * 24 * 60 * 60 * 1000;
+      const renewed = await client.execute({
+        sql: `UPDATE hostings
+          SET expires_at = (CASE WHEN expires_at > ? THEN expires_at ELSE ? END) + ?,
+              status = 'active', last_renewal_order_id = ?
+          WHERE code = ? AND (last_renewal_order_id IS NULL OR last_renewal_order_id < ?)` ,
+        args: [now, now, durationMs, Number(order.id), current.code, Number(order.id)]
+      });
+      const refreshed = await getHostingByCode(current.code);
+      if (Number(renewed.rowsAffected || 0) === 0 && !refreshed) {
+        await client.execute({ sql: "UPDATE orders SET status = 'pending' WHERE id = ? AND status = 'processing'", args: [Number(order.id)] });
+        return null;
+      }
+      if (Number(renewed.rowsAffected || 0) === 0) {
+        const row = await client.execute({ sql: 'SELECT last_renewal_order_id FROM hostings WHERE code = ?', args: [current.code] });
+        if (Number(row.rows[0]?.last_renewal_order_id) !== Number(order.id)) {
+          await client.execute({ sql: "UPDATE orders SET status = 'pending' WHERE id = ? AND status = 'processing'", args: [Number(order.id)] });
+          return null;
+        }
+      }
+      await client.execute({
+        sql: "UPDATE orders SET status = 'approved', hosting_code = ?, approved_at = ? WHERE id = ? AND status = 'processing'",
+        args: [current.code, Date.now(), Number(order.id)]
+      });
+      return { order: await getOrderByCode(orderCode), hosting: await getHostingByCode(current.code), alreadyApproved: false, renewed: true };
+    }
 
-  const hosRes = await client.execute({
-    sql: `
-      INSERT INTO hostings (code, guild_id, customer_id, plan_name, specs, price, status, access_info, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
-    `,
-    args: [tempHos, order.guild_id, order.customer_id, order.plan_name, product?.specs || product?.description || '', Number(order.final_price), String(accessInfo || 'Ativado'), now, expiresAt]
-  });
-
-  const hosId = Number(hosRes.lastInsertRowid);
-  const hosCode = `HOS-${String(hosId).padStart(5, '0')}`;
-  await client.execute({ sql: 'UPDATE hostings SET code = ? WHERE id = ?', args: [hosCode, hosId] });
-  await client.execute({ sql: "UPDATE orders SET status = 'approved', hosting_code = ?, approved_at = ? WHERE id = ?", args: [hosCode, now, Number(order.id)] });
-
-  const hosting = await getHostingByCode(hosCode);
-  const updatedOrder = await getOrderByCode(orderCode);
-  return { order: updatedOrder, hosting, alreadyApproved: false };
+    const product = await getProduct(order.product_id, order.guild_id);
+    const now = Date.now();
+    const expiresAt = now + Math.max(1, Number(order.duration_days) || 30) * 24 * 60 * 60 * 1000;
+    const tempCode = 'HOS-TMP-' + randomBytes(8).toString('hex');
+    await client.execute({
+      sql: `INSERT OR IGNORE INTO hostings
+        (code, guild_id, customer_id, plan_name, specs, price, status, access_info, created_at, expires_at, source_order_id)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+      args: [tempCode, order.guild_id, order.customer_id, order.plan_name, product?.specs || product?.description || '',
+        Number(order.final_price), String(accessInfo || 'Ativado'), now, expiresAt, Number(order.id)]
+    });
+    const hosRes = await client.execute({ sql: 'SELECT * FROM hostings WHERE source_order_id = ? LIMIT 1', args: [Number(order.id)] });
+    const hostingRow = hosRes.rows[0];
+    if (!hostingRow) throw new Error('Não foi possível localizar a hospedagem vinculada ao pedido.');
+    const hosCode = 'HOS-' + String(hostingRow.id).padStart(5, '0');
+    if (hostingRow.code !== hosCode) {
+      await client.execute({ sql: 'UPDATE hostings SET code = ? WHERE id = ?', args: [hosCode, Number(hostingRow.id)] });
+    }
+    await client.execute({
+      sql: "UPDATE orders SET status = 'approved', hosting_code = ?, approved_at = ? WHERE id = ? AND status = 'processing'",
+      args: [hosCode, now, Number(order.id)]
+    });
+    return { order: await getOrderByCode(orderCode), hosting: await getHostingByCode(hosCode), alreadyApproved: false };
+  } catch (err) {
+    await client.execute({
+      sql: "UPDATE orders SET status = 'pending' WHERE id = ? AND status = 'processing'",
+      args: [Number(order.id)]
+    }).catch(() => {});
+    throw err;
+  }
 }
 
 async function refundOrder(orderCode) {
