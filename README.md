@@ -86,6 +86,37 @@ Ambos usam o mesmo banco Turso, mas funções separadas. Nunca use `APP_ROLE=all
 
 O deploy de um serviço não reinicia o outro. Uma atualização do código do bot só chega ao Discord quando o serviço `bot` no Railway (ou o serviço `all` escolhido) for implantado e reconectar. Os comandos slash são atualizados pelo Discord quando `REGISTER_COMMANDS=true`; comandos globais podem levar algum tempo para aparecer em todos os clientes.
 
+
+## Mercado Pago por loja (OAuth)
+
+Cada loja tem uma conexão Mercado Pago independente. O responsável da loja abre `/seller/ID_DO_SERVIDOR`, autentica com a conta Discord que consta como proprietária e escolhe **Conectar Mercado Pago**. A autorização usa OAuth Authorization Code + PKCE; os access/refresh tokens são armazenados criptografados com AES-256-GCM no Turso. A senha do vendedor nunca é solicitada pelo bot.
+
+### Variáveis adicionais
+
+Configure no **Render e no Railway** as mesmas variáveis de integração para que o painel e o worker possam acessar/renovar as conexões:
+
+- `MP_CLIENT_ID` e `MP_CLIENT_SECRET`: credenciais da aplicação Mercado Pago do marketplace.
+- `MP_REDIRECT_URI`: URL fixa do callback, exatamente igual à cadastrada na aplicação Mercado Pago, por exemplo `https://SEU-DOMINIO/oauth/mercadopago/callback`.
+- `MP_TOKEN_ENCRYPTION_KEY`: chave aleatória de 32 bytes para criptografar tokens. Gere uma vez com `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` e use o mesmo valor nos dois serviços. Nunca troque sem migrar/recriptografar os tokens já salvos.
+- `PUBLIC_BASE_URL`: URL HTTPS pública do Render, sem barra final.
+- `MP_MODE`: `test` durante homologação ou `production` para pagamentos reais.
+- `MP_WEBHOOK_SECRET`: assinatura secreta de Webhooks da aplicação Mercado Pago; necessária no Render.
+- `DISCORD_CLIENT_SECRET` e `DISCORD_REDIRECT_URI`: login OAuth Discord do portal do lojista. Cadastre o callback exato na aplicação Discord.
+
+No Render, configure também `APP_ROLE=web`, `DISCORD_CLIENT_SECRET`, `DISCORD_REDIRECT_URI`, `MP_WEBHOOK_SECRET` e `MP_MODE`. No Railway, configure `APP_ROLE=bot` e as credenciais Mercado Pago/criptografia/URL pública compartilhadas. O worker não precisa do segredo de webhook nem do segredo OAuth Discord.
+
+### Configuração externa obrigatória
+
+1. Cadastre os callbacks OAuth exatos nas aplicações Discord e Mercado Pago.
+2. Habilite PKCE para o fluxo Authorization Code na aplicação Mercado Pago.
+3. Configure Webhooks de pagamento da aplicação Mercado Pago para `https://SEU-DOMINIO/webhooks/mercadopago` e selecione eventos de criação/atualização de pagamentos.
+4. Use contas de teste e `MP_MODE=test` primeiro. Só habilite `MP_MODE=production` depois de homologar todos os fluxos.
+5. Cada conta recebedora deve pertencer ao responsável adulto da respectiva loja e concluir os requisitos de cadastro/verificação do Mercado Pago.
+
+O callback de retorno do checkout não aprova pedidos. A liberação só acontece após validar assinatura do webhook, conta recebedora, ID da preferência, referência externa, valor e moeda consultados diretamente na API do Mercado Pago. Pedidos Mercado Pago não podem ser aprovados manualmente antes da confirmação.
+
+**Importante:** o backup JSON não exporta as conexões nem os tokens Mercado Pago. A chave `MP_TOKEN_ENCRYPTION_KEY` deve ser guardada fora do repositório e com backup seguro; perder essa chave impede descriptografar conexões existentes.
+
 ## Rotas web
 
 - `/health`: health check simples do processo web.
