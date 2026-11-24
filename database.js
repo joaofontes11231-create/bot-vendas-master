@@ -707,7 +707,7 @@ async function updateOrderMercadoPagoPreference(orderCode, { preferenceId, payme
 async function claimMercadoPagoCheckout(orderCode) {
   const client = getClient();
   const res = await client.execute({
-    sql: "UPDATE orders SET payment_provider = 'mercadopago', payment_status = 'creating' WHERE order_code = ? AND status = 'pending' AND payment_provider IS NULL",
+    sql: "UPDATE orders SET payment_provider = 'mercadopago', payment_status = 'creating' WHERE order_code = ? AND status = 'pending' AND (payment_provider IS NULL OR (payment_provider = 'mercadopago' AND payment_status = 'failed' AND mp_preference_id IS NULL))",
     args: [String(orderCode).toUpperCase()]
   });
   return Number(res.rowsAffected || 0) === 1;
