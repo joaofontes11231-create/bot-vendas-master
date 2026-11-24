@@ -5,14 +5,23 @@ const { startBot } = require('./bot');
 const { startWeb } = require('./web');
 
 async function main() {
-  // Não aceite tráfego antes de confirmar que o schema do banco está pronto.
+  const role = String(process.env.APP_ROLE || 'all').trim().toLowerCase();
+  if (!['all', 'web', 'bot'].includes(role)) {
+    throw new Error('APP_ROLE inválido. Use all, web ou bot.');
+  }
+
+  // Cada serviço inicializa o schema compartilhado antes de atender sua função.
   await initDB();
 
-  // O servidor web fica disponível para health checks antes do login do Discord.
-  await startWeb();
+  if (role === 'all' || role === 'web') {
+    await startWeb();
+  }
 
-  // Há apenas um ponto de entrada para iniciar o bot, evitando logins duplicados.
-  await startBot();
+  if (role === 'all' || role === 'bot') {
+    await startBot();
+  }
+
+  console.log(`✅ Serviço iniciado. APP_ROLE=${role}`);
 }
 
 main().catch((err) => {
