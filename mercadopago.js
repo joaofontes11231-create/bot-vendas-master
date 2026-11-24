@@ -235,7 +235,7 @@ function verifyWebhookSignature({ signature, requestId, dataId, secret }) {
   }));
   const ts = fields.ts;
   const received = fields.v1;
-  if (!/^\\d+$/.test(ts || '') || !/^[a-f0-9]{64}$/i.test(received || '')) return false;
+  if (!/^\d+$/.test(ts || '') || !/^[a-f0-9]{64}$/i.test(received || '')) return false;
   const manifest = 'id:' + String(dataId).toLowerCase() + ';request-id:' + String(requestId) + ';ts:' + ts + ';';
   const expected = crypto.createHmac('sha256', secret).update(manifest).digest();
   const supplied = Buffer.from(received, 'hex');
