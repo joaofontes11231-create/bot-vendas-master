@@ -174,6 +174,89 @@ const STYLES = `
   }
 `;
 
+
+app.post('/webhooks/mercadopago', async (req, res) => {
+  try {
+    const secret = String(process.env.MP_WEBHOOK_SECRET || '').trim();
+    if (!secret) return res.status(503).send('Webhook não configurado.');
+    const dataId = String(req.query['data.id'] || req.body?.data?.id || '');
+    const valid = mp.verifyWebhookSignature({
+      signature: req.get('x-signature'),
+      requestId: req.get('x-request-id'),
+      dataId,
+      secret
+    });
+    if (!valid) return res.status(401).send('Assinatura inválida.');
+
+    const topic = String(req.query.type || req.body?.type || '');
+    if (topic !== 'payment' && req.body?.type !== 'payment') return res.sendStatus(200);
+    const sellerId = String(req.body?.user_id || '');
+    if (!/^\\d{1,24}$/.test(sellerId) || !/^\\d{1,32}$/.test(dataId)) {
+      return res.status(400).send('Notificação incompleta.');
+    }
+    const connection = await db.getMercadoPagoConnectionByUserId(sellerId);
+    if (!connection) return res.sendStatus(200);
+    const accessToken = await mp.refreshSellerToken(connection, db);
+    const payment = await mp.fetchPayment(dataId, accessToken);
+    if (String(payment.collector_id) !== String(connection.mp_user_id)) {
+      return res.status(403).send('Conta recebedora não corresponde à loja.');
+    }
+    const orderCode = String(payment.external_reference || '').trim().toUpperCase();
+    if (!/^PED-[A-Z0-9-]{1,32}$/.test(orderCode)) return res.sendStatus(200);
+    const order = await db.getOrderByCode(orderCode);
+    if (!order || String(order.guild_id) !== String(connection.guild_id) ||
+        order.payment_provider !== 'mercadopago') {
+      return res.sendStatus(200);
+    }
+    const paidAmount = Number(payment.transaction_amount);
+    const expectedAmount = Number(order.final_price);
+    if (String(payment.currency_id) !== 'BRL' ||
+        !Number.isFinite(paidAmount) ||
+        paidAmount.toFixed(2) !== expectedAmount.toFixed(2)) {
+      console.error('Pagamento Mercado Pago divergente para pedido:', orderCode);
+      return res.status(409).send('Valor ou moeda divergente.');
+    }
+    if (order.status === 'approved' && String(order.mp_payment_id) === String(payment.id)) {
+      return res.sendStatus(200);
+    }
+    if (order.status !== 'pending') return res.sendStatus(200);
+
+    const paymentStatus = String(payment.status || 'unknown');
+    const recorded = await db.markOrderMercadoPagoPayment(orderCode, payment.id, paymentStatus);
+    if (!recorded) {
+      const latest = await db.getOrderByCode(orderCode);
+      if (latest?.status === 'approved' && String(latest.mp_payment_id) === String(payment.id)) {
+        return res.sendStatus(200);
+      }
+      return res.sendStatus(200);
+    }
+    if (paymentStatus !== 'approved') return res.sendStatus(200);
+
+    const result = await db.approveOrderAndCreateHosting(orderCode, 'Ativado após confirmação automática do Mercado Pago');
+    if (!result) return res.status(409).send('Pedido não pôde ser liberado; será reprocessado.');
+    if (!result.alreadyApproved) {
+      const license = await db.getLicense(order.guild_id);
+      await db.logAudit(order.guild_id, 'MERCADO_PAGO', 'PAGAMENTO_APROVADO', orderCode + ' / ' + String(payment.id));
+      await notifyOrderApproved(result, license?.store_name || 'Loja');
+      refreshAllFixedPanels().catch(() => {});
+    }
+    return res.sendStatus(200);
+  } catch (err) {
+    console.error('Erro ao processar webhook Mercado Pago:', err.message);
+    return res.status(500).send('Falha ao processar notificação.');
+  }
+});
+
+app.get('/payment/result', (req, res) => {
+  const status = String(req.query.status || 'pending');
+  const message = status === 'success'
+    ? 'Pagamento enviado para confirmação. A liberação acontece somente após a confirmação pelo Mercado Pago.'
+    : status === 'failure'
+      ? 'O pagamento não foi concluído. Você pode voltar ao Discord e tentar novamente.'
+      : 'Pagamento pendente. Aguarde a confirmação do Mercado Pago.';
+  res.send('<!doctype html><html lang="pt-BR"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Status do pagamento</title><body style="font:16px Arial;background:#0b1120;color:white;padding:32px"><main style="max-width:560px;margin:10vh auto;background:#1e293b;padding:24px;border-radius:14px"><h1>Status do pagamento</h1><p>' + message + '</p><p style="color:#94a3b8">Não feche o Discord até receber a confirmação do pedido.</p></main></body></html>');
+});
+
 app.get('/health', (req, res) => {
   res.status(200).json({ ok: true, service: 'web', timestamp: new Date().toISOString() });
 });
@@ -594,6 +677,9 @@ app.post('/api/orders/:orderCode/approve', requireAuth, async (req, res) => {
     if (!current) return res.status(404).json({ ok: false, error: 'Pedido não encontrado.' });
     if (current.status !== 'pending') {
       return res.status(409).json({ ok: false, error: 'O pedido não está pendente ou já foi processado.' });
+    }
+    if (current.payment_provider === 'mercadopago' && current.payment_status !== 'approved') {
+      return res.status(409).json({ ok: false, error: 'Este pedido só pode ser liberado após a confirmação automática do Mercado Pago.' });
     }
 
     const { access_info } = req.body;
