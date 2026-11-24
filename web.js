@@ -5,6 +5,19 @@ const db = require('./database');
 const { client: discordClient, notifyLicenseActivated, notifyLicenseBlocked, notifyOrderApproved, refreshAllFixedPanels } = require('./bot');
 
 const app = express();
+app.disable('x-powered-by');
+
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  if (process.env.NODE_ENV === 'production') {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+});
 
 app.set('trust proxy', 1);
 app.use(express.json({ limit: '32kb' }));
@@ -28,7 +41,7 @@ app.use(
       maxAge: 1000 * 60 * 60 * 12,
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'lax'
+      sameSite: 'strict'
     }
   })
 );
@@ -57,6 +70,16 @@ const LOGIN_MAX_ATTEMPTS = 5;
 
 function getLoginAttempt(ip) {
   const now = Date.now();
+  if (loginAttempts.size > 5000) {
+    for (const [key, value] of loginAttempts) {
+      if (value.resetAt <= now) loginAttempts.delete(key);
+    }
+    while (loginAttempts.size > 5000) {
+      const oldestKey = loginAttempts.keys().next().value;
+      if (oldestKey === undefined) break;
+      loginAttempts.delete(oldestKey);
+    }
+  }
   const current = loginAttempts.get(ip);
   if (!current || current.resetAt <= now) {
     const next = { count: 0, resetAt: now + LOGIN_WINDOW_MS };
@@ -68,6 +91,9 @@ function getLoginAttempt(ip) {
 
 function requireAuth(req, res, next) {
   if (req.session && req.session.authenticated) return next();
+  if (req.path.startsWith('/api/')) {
+    return res.status(401).json({ ok: false, error: 'Autenticação necessária.' });
+  }
   return res.redirect('/login');
 }
 
@@ -831,8 +857,18 @@ function startWeb() {
   if (!Number.isInteger(port) || port < 1 || port > 65535) {
     throw new Error('PORT inválida: informe uma porta entre 1 e 65535.');
   }
-  if (!process.env.MASTER_PASSWORD) {
+  const masterPassword = process.env.MASTER_PASSWORD || '';
+  const configuredSessionSecret = process.env.SESSION_SECRET?.trim() || '';
+  if (!masterPassword) {
     throw new Error('MASTER_PASSWORD não configurada. Defina uma senha segura no ambiente.');
+  }
+  if (process.env.NODE_ENV === 'production') {
+    if (masterPassword.length < 12) {
+      throw new Error('Em produção, MASTER_PASSWORD deve ter pelo menos 12 caracteres.');
+    }
+    if (configuredSessionSecret.length < 32) {
+      throw new Error('Em produção, SESSION_SECRET deve ter pelo menos 32 caracteres aleatórios.');
+    }
   }
 
   return new Promise((resolve, reject) => {
