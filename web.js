@@ -223,6 +223,7 @@ app.post('/webhooks/mercadopago', async (req, res) => {
       return res.status(409).send('Valor ou moeda divergente.');
     }
     if (order.status === 'approved' && String(order.mp_payment_id) === String(payment.id)) {
+      await db.enqueuePaymentNotification(orderCode);
       return res.sendStatus(200);
     }
     if (order.status !== 'pending') return res.sendStatus(200);
@@ -241,9 +242,8 @@ app.post('/webhooks/mercadopago', async (req, res) => {
     const result = await db.approveOrderAndCreateHosting(orderCode, 'Ativado após confirmação automática do Mercado Pago');
     if (!result) return res.status(409).send('Pedido não pôde ser liberado; será reprocessado.');
     if (!result.alreadyApproved) {
-      const license = await db.getLicense(order.guild_id);
       await db.logAudit(order.guild_id, 'MERCADO_PAGO', 'PAGAMENTO_APROVADO', orderCode + ' / ' + String(payment.id));
-      await notifyOrderApproved(result, license?.store_name || 'Loja');
+      await db.enqueuePaymentNotification(orderCode);
       refreshAllFixedPanels().catch(() => {});
     }
     return res.sendStatus(200);
@@ -695,8 +695,7 @@ app.post('/api/orders/:orderCode/approve', requireAuth, async (req, res) => {
       return res.status(409).json({ ok: false, error: 'Este pedido já foi aprovado.' });
     }
     await db.logAudit(result.order.guild_id, 'WEB_MASTER', 'APROVAR_PEDIDO', `${result.order.order_code} -> ${result.hosting.code}`);
-    const license = await db.getLicense(result.order.guild_id);
-    await notifyOrderApproved(result, license?.store_name || 'Hospedagem');
+    await db.enqueuePaymentNotification(result.order.order_code);
     refreshAllFixedPanels().catch(() => {});
     res.json({ ok: true, result });
   } catch (err) {
