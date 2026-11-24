@@ -1,21 +1,70 @@
 const express = require('express');
 const session = require('express-session');
+const crypto = require('node:crypto');
 const db = require('./database');
-const { notifyLicenseActivated, notifyLicenseBlocked, refreshAllFixedPanels } = require('./bot');
+const { client: discordClient, notifyLicenseActivated, notifyLicenseBlocked, refreshAllFixedPanels } = require('./bot');
 
 const app = express();
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.set('trust proxy', 1);
+app.use(express.json({ limit: '32kb' }));
+app.use(express.urlencoded({ extended: true, limit: '16kb' }));
+
+// A generated fallback prevents a known/default secret; configure SESSION_SECRET
+// in production to keep sessions valid across restarts.
+const sessionSecret = process.env.SESSION_SECRET?.trim() || crypto.randomBytes(48).toString('hex');
+if (!process.env.SESSION_SECRET?.trim()) {
+  console.warn('⚠️ SESSION_SECRET não definido: sessões serão invalidadas quando o processo reiniciar.');
+}
 
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || 'segredo_hospedagem_pro_2026',
+    name: 'hosting.sid',
+    secret: sessionSecret,
     resave: false,
     saveUninitialized: false,
-    cookie: { maxAge: 1000 * 60 * 60 * 12 }
+    rolling: true,
+    cookie: {
+      maxAge: 1000 * 60 * 60 * 12,
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax'
+    }
   })
 );
+
+// Proteção simples contra submissões cross-site em rotas que alteram dados.
+app.use((req, res, next) => {
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return next();
+  const origin = req.get('origin');
+  const fetchSite = req.get('sec-fetch-site');
+  if (fetchSite === 'cross-site') return res.status(403).json({ ok: false, error: 'Origem não permitida.' });
+  if (origin) {
+    try {
+      if (new URL(origin).host !== req.get('host')) {
+        return res.status(403).json({ ok: false, error: 'Origem não permitida.' });
+      }
+    } catch {
+      return res.status(403).json({ ok: false, error: 'Origem inválida.' });
+    }
+  }
+  return next();
+});
+
+const loginAttempts = new Map();
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 5;
+
+function getLoginAttempt(ip) {
+  const now = Date.now();
+  const current = loginAttempts.get(ip);
+  if (!current || current.resetAt <= now) {
+    const next = { count: 0, resetAt: now + LOGIN_WINDOW_MS };
+    loginAttempts.set(ip, next);
+    return next;
+  }
+  return current;
+}
 
 function requireAuth(req, res, next) {
   if (req.session && req.session.authenticated) return next();
@@ -98,8 +147,13 @@ const STYLES = `
   }
 `;
 
+app.get('/health', (req, res) => {
+  res.status(200).json({ ok: true, service: 'web', timestamp: new Date().toISOString() });
+});
+
 app.get('/status', async (req, res) => {
   const m = await db.getGlobalMetrics();
+  const botStatus = discordClient.isReady() ? 'ONLINE' : 'OFFLINE';
   res.send(`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -121,8 +175,8 @@ app.get('/status', async (req, res) => {
       </div>
     </header>
     <div class="stats">
-      <div class="stat-card"><div class="muted">Bot Discord</div><div class="stat-val" style="color:#4ade80;">ONLINE</div></div>
-      <div class="stat-card"><div class="muted">Banco Central</div><div class="stat-val" style="color:#4ade80;">ONLINE</div></div>
+      <div class="stat-card"><div class="muted">Bot Discord</div><div class="stat-val" style="color:${botStatus === 'ONLINE' ? '#4ade80' : '#f87171'};">${botStatus}</div></div>
+      <div class="stat-card"><div class="muted">Banco Central</div><div class="stat-val" style="color:#4ade80;">ONLINE (consulta OK)</div></div>
       <div class="stat-card"><div class="muted">Hospedagens Ativas</div><div class="stat-val">${m.activeHostings}</div></div>
       <div class="stat-card"><div class="muted">Avaliação Média</div><div class="stat-val">${m.avgRating}★</div></div>
     </div>
@@ -191,13 +245,36 @@ app.get('/login', (req, res) => {
 });
 
 app.post('/login', (req, res) => {
-  const masterPass = (process.env.MASTER_PASSWORD || '').trim();
-  const inputPass = (req.body.password || '').trim();
-  if (masterPass && inputPass === masterPass) {
-    req.session.authenticated = true;
-    return res.redirect('/');
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const attempts = getLoginAttempt(ip);
+  if (attempts.count >= LOGIN_MAX_ATTEMPTS) {
+    const retrySeconds = Math.max(1, Math.ceil((attempts.resetAt - Date.now()) / 1000));
+    res.setHeader('Retry-After', String(retrySeconds));
+    return res.status(429).send('Muitas tentativas. Aguarde alguns minutos e tente novamente.');
   }
-  return res.redirect('/login?error=1');
+
+  const masterPass = process.env.MASTER_PASSWORD || '';
+  const inputPass = typeof req.body.password === 'string' ? req.body.password : '';
+  const expected = Buffer.from(masterPass, 'utf8');
+  const supplied = Buffer.from(inputPass, 'utf8');
+  const passwordMatches = expected.length > 0 &&
+    expected.length === supplied.length &&
+    crypto.timingSafeEqual(expected, supplied);
+
+  if (!passwordMatches) {
+    attempts.count += 1;
+    return res.redirect('/login?error=1');
+  }
+
+  loginAttempts.delete(ip);
+  return req.session.regenerate((err) => {
+    if (err) return res.status(500).send('Não foi possível iniciar a sessão.');
+    req.session.authenticated = true;
+    return req.session.save((saveErr) => {
+      if (saveErr) return res.status(500).send('Não foi possível salvar a sessão.');
+      return res.redirect('/');
+    });
+  });
 });
 
 app.post('/logout', (req, res) => {
@@ -727,8 +804,20 @@ app.get('/cliente/:ownerId', requireAuth, (req, res) => {
 
 function startWeb() {
   const port = Number(process.env.PORT) || 8080;
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`🌐 Site e Central Administrativa Pro online na porta ${port}`);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error('PORT inválida: informe uma porta entre 1 e 65535.');
+  }
+  if (!process.env.MASTER_PASSWORD) {
+    throw new Error('MASTER_PASSWORD não configurada. Defina uma senha segura no ambiente.');
+  }
+
+  return new Promise((resolve, reject) => {
+    const server = app.listen(port, '0.0.0.0');
+    server.once('error', reject);
+    server.once('listening', () => {
+      console.log(`🌐 Site e Central Administrativa Pro online na porta ${port}`);
+      resolve(server);
+    });
   });
 }
 
