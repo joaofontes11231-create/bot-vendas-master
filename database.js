@@ -226,6 +226,14 @@ async function initDB() {
       sent_at INTEGER NOT NULL
     )
   `);
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS payment_notification_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_code TEXT UNIQUE NOT NULL,
+      created_at INTEGER NOT NULL,
+      processed_at INTEGER
+    )
+  `);
 
   await client.execute(`
     CREATE TABLE IF NOT EXISTS audit_logs (
@@ -1034,6 +1042,32 @@ async function exportFullBackup() {
   };
 }
 
+
+async function enqueuePaymentNotification(orderCode) {
+  const client = getClient();
+  await client.execute({
+    sql: 'INSERT OR IGNORE INTO payment_notification_outbox (order_code, created_at, processed_at) VALUES (?, ?, NULL)',
+    args: [String(orderCode).toUpperCase(), Date.now()]
+  });
+}
+
+async function getPendingPaymentNotifications(limit = 20) {
+  const client = getClient();
+  const res = await client.execute({
+    sql: 'SELECT * FROM payment_notification_outbox WHERE processed_at IS NULL ORDER BY id ASC LIMIT ?',
+    args: [Math.max(1, Math.min(100, Number(limit) || 20))]
+  });
+  return res.rows;
+}
+
+async function markPaymentNotificationProcessed(orderCode) {
+  const client = getClient();
+  await client.execute({
+    sql: 'UPDATE payment_notification_outbox SET processed_at = ? WHERE order_code = ? AND processed_at IS NULL',
+    args: [Date.now(), String(orderCode).toUpperCase()]
+  });
+}
+
 module.exports = {
   initDB,
   logAudit,
@@ -1057,6 +1091,9 @@ module.exports = {
   createOrder,
   createRenewalOrder,
   getOrderByCode,
+  enqueuePaymentNotification,
+  getPendingPaymentNotifications,
+  markPaymentNotificationProcessed,
   saveMercadoPagoConnection,
   getMercadoPagoConnection,
   getMercadoPagoConnectionByUserId,
