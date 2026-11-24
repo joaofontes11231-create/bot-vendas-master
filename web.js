@@ -225,6 +225,9 @@ app.post('/webhooks/mercadopago', async (req, res) => {
     const paymentStatus = String(payment.status || 'unknown');
     if (order.status === 'approved' && String(order.mp_payment_id) === String(payment.id)) {
       await db.updateApprovedMercadoPagoPaymentStatus(orderCode, payment.id, paymentStatus);
+      if (paymentStatus === 'approved') {
+        await db.enqueuePaymentNotification(orderCode);
+      }
       if (['refunded', 'charged_back', 'cancelled'].includes(paymentStatus)) {
         await db.logAudit(order.guild_id, 'MERCADO_PAGO', 'STATUS_PAGAMENTO_' + paymentStatus.toUpperCase(), orderCode + ' / ' + String(payment.id));
       }
