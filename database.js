@@ -547,6 +547,12 @@ async function createRenewalOrder(guildId, customerId, hostingCode) {
   }
 
   const client = getClient();
+  const pendingRenewal = await client.execute({
+    sql: "SELECT * FROM orders WHERE guild_id = ? AND customer_id = ? AND renewal_hosting_code = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+    args: [gid, customer, hosting.code]
+  });
+  if (pendingRenewal.rows[0]) return pendingRenewal.rows[0];
+
   const periodRes = await client.execute({
     sql: "SELECT duration_days FROM orders WHERE hosting_code = ? AND guild_id = ? AND status = 'approved' ORDER BY approved_at DESC, id DESC LIMIT 1",
     args: [hosting.code, gid]
