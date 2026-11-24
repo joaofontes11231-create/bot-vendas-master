@@ -41,7 +41,7 @@ Gere um segredo de sessão forte com:
 node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
 ```
 
-Configure esse valor como `SESSION_SECRET` nas variáveis do Railway ou Render. Sem ele, o sistema gera um segredo aleatório a cada inicialização e as sessões serão encerradas quando o processo reiniciar.
+Configure esse valor como `SESSION_SECRET` nas variáveis do Railway ou Render. Em produção, use pelo menos 32 caracteres aleatórios e uma `MASTER_PASSWORD` com pelo menos 12 caracteres; o servidor agora recusa iniciar em produção se esses requisitos não forem atendidos. As sessões usam cookie HTTP-only, Secure em HTTPS e SameSite Strict.
 
 ## Executar localmente
 
@@ -89,7 +89,8 @@ Embora a dependência `mercadopago` esteja no `package.json`, o código atual n�
 - Teste compra, aprovação, renovação, suspensão, DM fechada e falha de banco em um servidor de testes.
 - Confirme manualmente os dados de pagamentos antes de aprovar pedidos.
 - Não compartilhe dados de acesso do cliente em canais públicos.
+- O painel fixo do cliente não deve exibir credenciais; ele informa que os dados são enviados somente por DM. Após atualizar a versão, remova painéis antigos não registrados e, se alguma credencial já apareceu em canal público, troque-a.
 
 ## Verificação disponível
 
-`npm test` verifica a sintaxe dos quatro arquivos JavaScript principais. Isso não substitui testes de integração com Discord, Turso ou o provedor de pagamentos.
+`npm test` executa verificações de regressão estáticas para invariantes de segurança e valida a sintaxe dos quatro arquivos JavaScript principais. O GitHub Actions também testa Node.js 20 e 22 e executa `npm audit --omit=dev --audit-level=high`. Isso não substitui testes de integração com Discord, Turso ou o provedor de pagamentos.
