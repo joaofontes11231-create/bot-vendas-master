@@ -113,7 +113,7 @@ No Render, configure também `APP_ROLE=web`, `DISCORD_CLIENT_SECRET`, `DISCORD_R
 4. Use contas de teste e `MP_MODE=test` primeiro. Só habilite `MP_MODE=production` depois de homologar todos os fluxos.
 5. Cada conta recebedora deve pertencer ao responsável adulto da respectiva loja e concluir os requisitos de cadastro/verificação do Mercado Pago.
 
-O callback de retorno do checkout não aprova pedidos. A liberação só acontece após validar assinatura do webhook, conta recebedora, ID da preferência, referência externa, valor e moeda consultados diretamente na API do Mercado Pago. Pedidos Mercado Pago não podem ser aprovados manualmente antes da confirmação.
+O callback de retorno do checkout não aprova pedidos. A liberação só acontece após validar assinatura do webhook, conta recebedora, ID da preferência, referência externa, valor e moeda consultados diretamente na API do Mercado Pago. Pedidos Mercado Pago não podem ser aprovados manualmente antes da confirmação. Atualizações posteriores de pagamento (estorno, chargeback ou cancelamento) são registradas no histórico de auditoria para revisão do responsável; a suspensão automática da hospedagem e a execução de estornos ainda exigem um fluxo operacional próprio.
 
 **Importante:** o backup JSON não exporta as conexões nem os tokens Mercado Pago. A chave `MP_TOKEN_ENCRYPTION_KEY` deve ser guardada fora do repositório e com backup seguro; perder essa chave impede descriptografar conexões existentes.
 
