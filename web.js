@@ -191,7 +191,7 @@ app.post('/webhooks/mercadopago', async (req, res) => {
     const topic = String(req.query.type || req.body?.type || '');
     if (topic !== 'payment' && req.body?.type !== 'payment') return res.sendStatus(200);
     const sellerId = String(req.body?.user_id || '');
-    if (!/^\\d{1,24}$/.test(sellerId) || !/^\\d{1,32}$/.test(dataId)) {
+    if (!/^\d{1,24}$/.test(sellerId) || !/^\d{1,32}$/.test(dataId)) {
       return res.status(400).send('Notificação incompleta.');
     }
     const connection = await db.getMercadoPagoConnectionByUserId(sellerId);
@@ -398,7 +398,7 @@ app.post('/logout', (req, res) => {
 });
 
 function isDiscordId(value) {
-  return /^\\d{17,20}$/.test(String(value || ''));
+  return /^\d{17,20}$/.test(String(value || ''));
 }
 
 function safeStateEqual(a, b) {
