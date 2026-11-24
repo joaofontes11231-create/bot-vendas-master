@@ -16,6 +16,7 @@ const {
   PermissionFlagsBits
 } = require('discord.js');
 const db = require('./database');
+const mp = require('./mercadopago');
 
 const OFFICIAL_DISCORD = 'https://discord.gg/ZQzv7U3Vnw';
 
@@ -860,6 +861,9 @@ client.on('interactionCreate', async (interaction) => {
         if (existing.status !== 'pending') {
           return interaction.reply({ content: `❌ O pedido **${orderCode}** não está pendente (status: ${existing.status}).`, ephemeral: true });
         }
+        if (existing.payment_provider === 'mercadopago' && existing.payment_status !== 'approved') {
+          return interaction.reply({ content: '⛔ Este pedido só pode ser liberado após a confirmação automática do Mercado Pago.', ephemeral: true });
+        }
 
         const result = await db.approveOrderAndCreateHosting(orderCode, accessInfo);
         if (!result) {
@@ -1141,20 +1145,31 @@ client.on('interactionCreate', async (interaction) => {
         if (!hostingCode || hostingCode === 'none') {
           return interaction.reply({ content: '❌ Não há hospedagem selecionada para renovar. Atualize seu painel.', ephemeral: true });
         }
+        if (!await db.getMercadoPagoConnectionStatus(interaction.guildId)) {
+          return interaction.reply({ content: '⛔ Esta loja ainda não conectou o Mercado Pago. O responsável deve conectar a conta no painel da loja antes de receber pagamentos.', ephemeral: true });
+        }
         const order = await db.createRenewalOrder(interaction.guildId, ownerOfPanel, hostingCode);
         if (!order) {
           return interaction.reply({ content: '❌ Não foi possível gerar a renovação desta hospedagem. Atualize o painel e tente novamente.', ephemeral: true });
         }
-        await refreshAllFixedPanels();
-        const pix = license.pix_key ? '`' + license.pix_key + '`' : 'Solicite ao dono no ticket';
-        return interaction.reply({
-          content: '🔄 **Pedido de Renovação Gerado: ' + order.order_code + '**\n' +
-            '🖥️ **Hospedagem:** ' + hostingCode + '\n' +
-            '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\n' +
-            '💠 **Chave PIX:** ' + pix + '\n' +
-            '*Após realizar o PIX, envie o comprovante para <@' + license.owner_id + '> liberar sua renovação!*',
-          ephemeral: true
-        });
+        try {
+          const checkout = await mp.createCheckoutPreference(order, db);
+          await refreshAllFixedPanels();
+          const row = new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setLabel('Pagar com Mercado Pago').setStyle(ButtonStyle.Link).setURL(checkout.paymentUrl)
+          );
+          return interaction.reply({
+            content: '🔄 **Renovação gerada: ' + order.order_code + '**\\n' +
+              '🖥️ **Hospedagem:** ' + hostingCode + '\\n' +
+              '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\\n' +
+              'O pagamento será confirmado automaticamente. Não envie comprovante nem compartilhe dados bancários.',
+            components: [row],
+            ephemeral: true
+          });
+        } catch (err) {
+          console.error('Falha ao criar checkout de renovação:', err.message);
+          return interaction.reply({ content: '❌ Não foi possível gerar o checkout agora. Nenhum pagamento foi confirmado; tente novamente mais tarde ou fale com o responsável pela loja.', ephemeral: true });
+        }
       }
       if (action === 'support') {
         return interaction.reply({ content: '🎫 Use `/suporte` ou clique no painel de tickets para abrir atendimento!', ephemeral: true });
@@ -1187,40 +1202,46 @@ client.on('interactionCreate', async (interaction) => {
       if (!prod) return interaction.reply({ content: '❌ Plano não encontrado.', ephemeral: true });
 
       const cupom = interaction.fields.getTextInputValue('cupom')?.trim() || null;
-      const order = await db.createOrder(interaction.guildId, interaction.user.id, prod, cupom);
-
-      await sendUserAlert(
-        license.owner_id,
-        `🔔 **Novo Pedido Gerado — ${license.store_name}**\n` +
-        `• **Pedido:** **${order.order_code}**\n` +
-        `• **Cliente:** <@${interaction.user.id}> (\`${interaction.user.id}\`)\n` +
-        `• **Plano:** ${order.plan_name} (${order.duration_days}d)\n` +
-        `• **Valor:** R$ ${Number(order.final_price).toFixed(2)}\n` +
-        `Use \`/painel_dono aprovar_pedido codigo_pedido:${order.order_code}\` ou aprove no **Site Oficial** após receber o PIX.`
-      );
-
-      if (license.logs_channel_id) {
-        const logCh = interaction.guild.channels.cache.get(license.logs_channel_id);
-        if (logCh && logCh.isTextBased()) {
-          await logCh.send(`🧾 Novo pedido **${order.order_code}** de <@${interaction.user.id}> — **${order.plan_name}** (R$ ${Number(order.final_price).toFixed(2)})`).catch(() => {});
-        }
+      if (!await db.getMercadoPagoConnectionStatus(interaction.guildId)) {
+        return interaction.reply({ content: '⛔ Esta loja ainda não conectou o Mercado Pago. O responsável pela loja precisa conectar a conta antes de receber pedidos.', ephemeral: true });
       }
-
-      await refreshAllFixedPanels();
-
-      const embed = new EmbedBuilder()
-        .setTitle(`🧾 Pedido Criado — ${order.order_code}`)
-        .setDescription(
-          `Seu pedido foi registrado! Efetue o pagamento via **PIX** abaixo e envie o comprovante para a equipe liberar sua hospedagem.\n\n` +
-          `💠 **Chave PIX:** ${license.pix_key ? `\`${license.pix_key}\`` : `Solicite a chave PIX a <@${license.owner_id}>`}\n` +
-          `💵 **Valor a Pagar:** **R$ ${Number(order.final_price).toFixed(2)}**${order.coupon_code ? ` (Cupom \`${order.coupon_code}\` aplicado!)` : ''}\n` +
-          `📦 **Plano:** ${order.plan_name} (**${order.duration_days} dia(s)**)\n` +
-          `🆔 **Código do Pedido:** \`${order.order_code}\``
-        )
-        .setColor('#00b0f4')
-        .setFooter({ text: 'Assim que o PIX for conferido, sua hospedagem será ativada e enviada na sua DM.' });
-
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+      const order = await db.createOrder(interaction.guildId, interaction.user.id, prod, cupom);
+      try {
+        const paymentCheckout = await mp.createCheckoutPreference(order, db);
+        await sendUserAlert(
+          license.owner_id,
+          '🔔 **Novo pedido — ' + license.store_name + '**\\n' +
+          '• **Pedido:** ' + order.order_code + '\\n' +
+          '• **Cliente:** <@' + interaction.user.id + '>\\n' +
+          '• **Plano:** ' + order.plan_name + '\\n' +
+          '• **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\\n' +
+          'O checkout foi criado na conta Mercado Pago conectada.'
+        );
+        if (license.logs_channel_id) {
+          const logCh = interaction.guild.channels.cache.get(license.logs_channel_id);
+          if (logCh && logCh.isTextBased()) {
+            await logCh.send('🧾 Pedido ' + order.order_code + ' criado para <@' + interaction.user.id + '> — R$ ' + Number(order.final_price).toFixed(2)).catch(() => {});
+          }
+        }
+        await refreshAllFixedPanels();
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setLabel('Pagar com Mercado Pago').setStyle(ButtonStyle.Link).setURL(paymentCheckout.paymentUrl)
+        );
+        const embed = new EmbedBuilder()
+          .setTitle('🧾 Pedido criado — ' + order.order_code)
+          .setDescription(
+            'Seu pedido foi registrado. Use o botão abaixo para pagar na conta Mercado Pago da loja.\\n\\n' +
+            '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\\n' +
+            '📦 **Plano:** ' + order.plan_name + ' (' + order.duration_days + ' dias)\\n' +
+            '🆔 **Pedido:** ' + order.order_code + '\\n\\n' +
+            'A hospedagem será liberada somente após a confirmação do pagamento pelo Mercado Pago.'
+          )
+          .setColor('#00b0f4');
+        return interaction.reply({ embeds: [embed], components: [row], ephemeral: true });
+      } catch (err) {
+        console.error('Falha ao criar checkout Mercado Pago:', err.message);
+        return interaction.reply({ content: '❌ Não foi possível gerar o checkout. Nenhum pagamento foi confirmado. Tente novamente mais tarde ou fale com o responsável pela loja.', ephemeral: true });
+      }
     }
   } catch (err) {
     console.error('❌ Erro na interação:', err);
