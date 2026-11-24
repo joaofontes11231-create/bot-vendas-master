@@ -50,6 +50,6 @@ test('environment template contains variable names but no populated secrets', ()
   const env = read('.env.example');
   for (const line of env.split(/\r?\n/)) {
     if (!line || line.startsWith('#')) continue;
-    assert.match(line, /^[A-Z0-9_]+=\s*$/);
+    assert.match(line, /^(?:[A-Z0-9_]+=\s*|REGISTER_COMMANDS=(?:true|false))$/);
   }
 });
