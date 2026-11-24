@@ -1025,6 +1025,10 @@ app.get('/cliente/:ownerId', requireAuth, (req, res) => {
 
             \${s.block_reason ? \`<div class="item-box" style="border-color:#dc2626;"><strong>Motivo do bloqueio:</strong> \${escapeHtml(s.block_reason)}</div>\` : ''}
 
+            <div class="actions">
+              <a class="btn" href="/seller/${encodeURIComponent(s.guild_id)}" target="_blank" rel="noopener">Portal do lojista / Mercado Pago</a>
+            </div>
+
             <form onsubmit="saveStore(event, '\${s.guild_id}')">
               <label>ID do Dono</label>
               <input type="text" name="owner_id" value="\${escapeHtml(s.owner_id)}" required />
