@@ -127,11 +127,11 @@ O callback de retorno do checkout não aprova pedidos. A liberação só acontec
 
 As sessões usam cookie HTTP-only e SameSite, o login tem limite local de tentativas e a sessão é regenerada após autenticação. O armazenamento de sessão padrão do express-session fica em memória; sessões não sobrevivem a reinícios e não são compartilhadas entre várias instâncias. Para produção com múltiplas instâncias, configure um session store persistente antes de escalar horizontalmente.
 
-## Pagamentos: limitação atual
+## Pagamentos
 
-O fluxo atualmente gera pedidos PIX e registra-os como pendentes. A liberação da hospedagem acontece quando o administrador confirma o recebimento manualmente por `/painel_dono aprovar_pedido` ou pelo painel web.
+O projeto implementa checkout Mercado Pago por loja, com conexão OAuth independente, tokens criptografados no Turso e confirmação por webhook assinado. Pedidos Mercado Pago só são liberados após consulta e validação do pagamento na API. Pedidos PIX legados continuam sujeitos à confirmação manual do administrador.
 
-Embora a dependência `mercadopago` esteja no `package.json`, o código atual não contém integração de API/webhook do Mercado Pago nem confirmação automática do PIX. **Não anuncie pagamentos ou entregas como automáticos até implementar e testar a confirmação assinada do provedor**, com idempotência e tratamento de eventos repetidos.
+A integração ainda precisa ser homologada com credenciais e contas de teste do Mercado Pago antes de receber pagamentos reais. Estornos e chargebacks posteriores são registrados para revisão; não há suspensão automática da hospedagem nem execução automática de estorno.
 
 ## Cuidados antes de produção
 
