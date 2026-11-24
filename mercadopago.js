@@ -100,37 +100,46 @@ async function exchangeAuthorizationCode(code, verifier) {
 }
 
 
-async function refreshSellerToken(connection, db) {
+const refreshInFlight = new Map();
+
+function refreshSellerToken(connection, db) {
   const now = Date.now();
   if (Number(connection.expires_at) > now + 5 * 60 * 1000) {
-    return decryptToken(connection.access_token_enc);
+    return Promise.resolve(decryptToken(connection.access_token_enc));
   }
-  const { clientId, clientSecret } = getOAuthConfig();
-  const refreshToken = decryptToken(connection.refresh_token_enc);
-  const response = await fetch('https://api.mercadopago.com/oauth/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: 'refresh_token',
-      refresh_token: refreshToken
-    }),
-    signal: AbortSignal.timeout(15000)
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.access_token || !data.refresh_token) {
-    throw new Error('A conexão Mercado Pago expirou ou foi revogada. O lojista precisa conectar novamente.');
-  }
-  await db.saveMercadoPagoConnection({
-    guildId: connection.guild_id,
-    mpUserId: String(data.user_id || connection.mp_user_id),
-    nickname: connection.nickname || '',
-    accessTokenEnc: encryptToken(String(data.access_token)),
-    refreshTokenEnc: encryptToken(String(data.refresh_token)),
-    expiresAt: Date.now() + Math.max(60, Number(data.expires_in) || 0) * 1000
-  });
-  return String(data.access_token);
+  const key = String(connection.guild_id);
+  if (refreshInFlight.has(key)) return refreshInFlight.get(key);
+
+  const task = (async () => {
+    const { clientId, clientSecret } = getOAuthConfig();
+    const refreshToken = decryptToken(connection.refresh_token_enc);
+    const response = await fetch('https://api.mercadopago.com/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({
+        client_id: clientId,
+        client_secret: clientSecret,
+        grant_type: 'refresh_token',
+        refresh_token: refreshToken
+      }),
+      signal: AbortSignal.timeout(15000)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.access_token || !data.refresh_token) {
+      throw new Error('A conexão Mercado Pago expirou ou foi revogada. O lojista precisa conectar novamente.');
+    }
+    await db.saveMercadoPagoConnection({
+      guildId: connection.guild_id,
+      mpUserId: String(data.user_id || connection.mp_user_id),
+      nickname: connection.nickname || '',
+      accessTokenEnc: encryptToken(String(data.access_token)),
+      refreshTokenEnc: encryptToken(String(data.refresh_token)),
+      expiresAt: Date.now() + Math.max(60, Number(data.expires_in) || 0) * 1000
+    });
+    return String(data.access_token);
+  })();
+  refreshInFlight.set(key, task);
+  return task.finally(() => refreshInFlight.delete(key));
 }
 
 async function createCheckoutPreference(order, db) {
