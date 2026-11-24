@@ -138,6 +138,25 @@ async function initDB() {
   `);
 
   await ensureColumn(client, 'orders', 'renewal_hosting_code', 'TEXT');
+  // Keep one active renewal order per customer and hosting; collapse legacy duplicates first.
+  await client.execute(`
+    UPDATE orders
+    SET status = 'superseded'
+    WHERE renewal_hosting_code IS NOT NULL
+      AND status IN ('pending', 'processing')
+      AND id NOT IN (
+        SELECT MAX(id)
+        FROM orders
+        WHERE renewal_hosting_code IS NOT NULL
+          AND status IN ('pending', 'processing')
+        GROUP BY guild_id, customer_id, renewal_hosting_code
+      )
+  `);
+  await client.execute(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_renewal
+    ON orders(guild_id, customer_id, renewal_hosting_code)
+    WHERE renewal_hosting_code IS NOT NULL AND status IN ('pending', 'processing')
+  `);
 
   await client.execute(`
     CREATE TABLE IF NOT EXISTS hostings (
@@ -569,10 +588,24 @@ async function createRenewalOrder(guildId, customerId, hostingCode) {
   };
 
   const order = await createOrder(gid, customer, renewalProduct);
-  await client.execute({
-    sql: 'UPDATE orders SET renewal_hosting_code = ? WHERE id = ? AND status = \'pending\'',
-    args: [hosting.code, Number(order.id)]
-  });
+  try {
+    await client.execute({
+      sql: 'UPDATE orders SET renewal_hosting_code = ? WHERE id = ? AND status = \'pending\'',
+      args: [hosting.code, Number(order.id)]
+    });
+  } catch (err) {
+    // A simultaneous click may have created the unique active renewal first.
+    await client.execute({
+      sql: "UPDATE orders SET status = 'superseded' WHERE id = ? AND status = 'pending'",
+      args: [Number(order.id)]
+    }).catch(() => {});
+    const winner = await client.execute({
+      sql: "SELECT * FROM orders WHERE guild_id = ? AND customer_id = ? AND renewal_hosting_code = ? AND status IN ('pending', 'processing') ORDER BY id DESC LIMIT 1",
+      args: [gid, customer, hosting.code]
+    });
+    if (winner.rows[0]) return winner.rows[0];
+    throw err;
+  }
 
   return getOrderByCode(order.order_code);
 }
