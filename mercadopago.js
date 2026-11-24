@@ -143,52 +143,68 @@ function refreshSellerToken(connection, db) {
 }
 
 async function createCheckoutPreference(order, db) {
+  if (order.mp_preference_id && order.payment_url) {
+    return { preferenceId: String(order.mp_preference_id), paymentUrl: String(order.payment_url) };
+  }
   const connection = await db.getMercadoPagoConnection(order.guild_id);
   if (!connection) throw new Error('Esta loja ainda não conectou uma conta Mercado Pago.');
-  const accessToken = await refreshSellerToken(connection, db);
-  let baseUrl = String(process.env.PUBLIC_BASE_URL || '').trim();
-  while (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1);
-  if (!baseUrl) throw new Error('PUBLIC_BASE_URL não configurada.');
-  const parsedBase = new URL(baseUrl);
-  if (process.env.NODE_ENV === 'production' && parsedBase.protocol !== 'https:') {
-    throw new Error('PUBLIC_BASE_URL deve usar HTTPS em produção.');
+  const claimed = await db.claimMercadoPagoCheckout(order.order_code);
+  if (!claimed) {
+    const latest = await db.getOrderByCode(order.order_code);
+    if (latest?.mp_preference_id && latest?.payment_url) {
+      return { preferenceId: String(latest.mp_preference_id), paymentUrl: String(latest.payment_url) };
+    }
+    throw new Error('O checkout deste pedido já está sendo criado ou não está mais pendente.');
   }
-  const amount = Number(order.final_price);
-  if (!Number.isFinite(amount) || amount <= 0) throw new Error('Valor do pedido inválido.');
-  const payload = {
-    items: [{
-      id: String(order.product_id || order.order_code),
-      title: String(order.plan_name || 'Produto').slice(0, 250),
-      quantity: 1,
-      currency_id: 'BRL',
-      unit_price: Number(amount.toFixed(2))
-    }],
-    external_reference: String(order.order_code),
-    notification_url: baseUrl + '/webhooks/mercadopago',
-    back_urls: {
-      success: baseUrl + '/payment/result?status=success',
-      pending: baseUrl + '/payment/result?status=pending',
-      failure: baseUrl + '/payment/result?status=failure'
-    },
-    auto_return: 'approved',
-    metadata: { guild_id: String(order.guild_id), order_code: String(order.order_code) }
-  };
-  const response = await fetch('https://api.mercadopago.com/checkout/preferences', {
-    method: 'POST',
-    headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json', Accept: 'application/json' },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(15000)
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.id || !data.init_point) {
-    throw new Error('Mercado Pago não conseguiu criar o checkout para esta loja.');
+  try {
+    const accessToken = await refreshSellerToken(connection, db);
+    let baseUrl = String(process.env.PUBLIC_BASE_URL || '').trim();
+    while (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1);
+    if (!baseUrl) throw new Error('PUBLIC_BASE_URL não configurada.');
+    const parsedBase = new URL(baseUrl);
+    if (process.env.NODE_ENV === 'production' && parsedBase.protocol !== 'https:') {
+      throw new Error('PUBLIC_BASE_URL deve usar HTTPS em produção.');
+    }
+    const amount = Number(order.final_price);
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Valor do pedido inválido.');
+    const payload = {
+      items: [{
+        id: String(order.product_id || order.order_code),
+        title: String(order.plan_name || 'Produto').slice(0, 250),
+        quantity: 1,
+        currency_id: 'BRL',
+        unit_price: Number(amount.toFixed(2))
+      }],
+      external_reference: String(order.order_code),
+      notification_url: baseUrl + '/webhooks/mercadopago',
+      back_urls: {
+        success: baseUrl + '/payment/result?status=success',
+        pending: baseUrl + '/payment/result?status=pending',
+        failure: baseUrl + '/payment/result?status=failure'
+      },
+      auto_return: 'approved',
+      metadata: { guild_id: String(order.guild_id), order_code: String(order.order_code) }
+    };
+    const response = await fetch('https://api.mercadopago.com/checkout/preferences', {
+      method: 'POST',
+      headers: { Authorization: 'Bearer ' + accessToken, 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(15000)
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.id || !data.init_point) {
+      throw new Error('Mercado Pago não conseguiu criar o checkout para esta loja.');
+    }
+    const saved = await db.updateOrderMercadoPagoPreference(order.order_code, {
+      preferenceId: data.id,
+      paymentUrl: data.init_point
+    });
+    if (!saved) throw new Error('O pedido deixou de estar pendente antes de salvar o checkout.');
+    return { preferenceId: String(data.id), paymentUrl: String(data.init_point) };
+  } catch (err) {
+    await db.failMercadoPagoCheckout(order.order_code).catch(() => {});
+    throw err;
   }
-  const saved = await db.updateOrderMercadoPagoPreference(order.order_code, {
-    preferenceId: data.id,
-    paymentUrl: data.init_point
-  });
-  if (!saved) throw new Error('O pedido deixou de estar pendente antes de salvar o checkout.');
-  return { preferenceId: String(data.id), paymentUrl: String(data.init_point) };
 }
 
 async function fetchPayment(paymentId, accessToken) {
