@@ -854,8 +854,20 @@ client.on('interactionCreate', async (interaction) => {
         if (!existing || existing.guild_id !== interaction.guildId) {
           return interaction.reply({ content: `❌ Pedido **${orderCode}** não encontrado nesta loja.`, ephemeral: true });
         }
+        if (existing.status === 'approved') {
+          return interaction.reply({ content: `✅ O pedido **${orderCode}** já foi aprovado e está vinculado à hospedagem **${existing.hosting_code || 'existente'}**.`, ephemeral: true });
+        }
+        if (existing.status !== 'pending') {
+          return interaction.reply({ content: `❌ O pedido **${orderCode}** não está pendente (status: ${existing.status}).`, ephemeral: true });
+        }
 
         const result = await db.approveOrderAndCreateHosting(orderCode, accessInfo);
+        if (!result) {
+          return interaction.reply({ content: '❌ Não foi possível aprovar o pedido. Atualize a lista e confira o status.', ephemeral: true });
+        }
+        if (result.alreadyApproved) {
+          return interaction.reply({ content: `✅ O pedido **${orderCode}** já estava aprovado.`, ephemeral: true });
+        }
         await db.logAudit(interaction.guildId, interaction.user.id, 'APROVAR_PEDIDO', `${orderCode} -> ${result.hosting.code}`);
 
         await notifyOrderApproved(result, license.store_name);
