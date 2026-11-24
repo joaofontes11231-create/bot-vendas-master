@@ -858,16 +858,7 @@ client.on('interactionCreate', async (interaction) => {
         const result = await db.approveOrderAndCreateHosting(orderCode, accessInfo);
         await db.logAudit(interaction.guildId, interaction.user.id, 'APROVAR_PEDIDO', `${orderCode} -> ${result.hosting.code}`);
 
-        await sendUserAlert(
-          result.order.customer_id,
-          `🎉 **Pagamento Confirmado & Hospedagem Ativa!**\n\n` +
-          `🏢 **Empresa:** ${license.store_name}\n` +
-          `🧾 **Pedido:** ${result.order.order_code}\n` +
-          `🆔 **ID da Hospedagem:** **${result.hosting.code}**\n` +
-          `📦 **Plano:** ${result.hosting.plan_name}\n` +
-          `⏳ **Vencimento:** ${formatDateBR(result.hosting.expires_at)} (${result.hosting.daysLeft}d)\n` +
-          `🔑 **Dados de Acesso:**\n\`\`\`${accessInfo}\`\`\``
-        );
+        await notifyOrderApproved(result, license.store_name);
 
         await refreshAllFixedPanels();
         return interaction.reply({
