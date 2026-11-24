@@ -55,15 +55,36 @@ O banco e suas migrações são inicializados antes de o site e o bot começarem
 
 ## Deploy
 
-O ponto de entrada `index.js` inicia **o bot Discord e o site no mesmo processo**. Portanto:
+O ponto de entrada suporta três perfis por meio de `APP_ROLE`:
 
-1. Publique este projeto como um único serviço contínuo no Railway **ou** no Render.
-2. Configure todas as variáveis de ambiente na plataforma.
-3. Use o comando de inicialização `npm start`.
-4. Configure o health check HTTP para `/health`, na porta disponibilizada por `PORT`.
-5. Mantenha apenas uma instância desse processo enquanto o bot não tiver coordenação distribuída/leader election.
+- `all` (padrão): inicia site e bot no mesmo processo. Use em apenas uma plataforma.
+- `web`: inicia somente o painel web. Use em um serviço Web do Render.
+- `bot`: inicia somente o worker Discord e as tarefas agendadas. Use em um serviço Worker do Railway.
 
-**Não rode o mesmo `npm start` simultaneamente no Railway e no Render.** Isso criaria duas instâncias do mesmo bot e poderia duplicar tarefas agendadas e mensagens. Para separar bot e site em serviços diferentes, primeiro será necessário separar os processos e adicionar controle de execução das tarefas.
+### Opção A — mais simples: uma plataforma
+
+1. Publique como um serviço contínuo no Railway **ou** no Render.
+2. Configure `APP_ROLE=all` (ou deixe sem definir), todas as variáveis e `npm start`.
+3. Configure o health check HTTP em `/health`.
+4. Mantenha apenas uma instância.
+
+### Opção B — Render + Railway separados
+
+**Render (Web Service):**
+- Build command: `npm ci`
+- Start command: `npm start`
+- Variáveis: `APP_ROLE=web`, `NODE_ENV=production`, `MASTER_PASSWORD`, `SESSION_SECRET`, `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`.
+- Health check path: `/health`.
+
+**Railway (Worker Service):**
+- Build command: `npm ci`
+- Start command: `npm start`
+- Variáveis: `APP_ROLE=bot`, `DISCORD_TOKEN`, `CLIENT_ID`, `MASTER_ID`, `REGISTER_COMMANDS=true` (na primeira publicação/ao alterar comandos), `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`.
+- Não configure réplicas maiores que 1 para o worker: ele executa tarefas periódicas.
+
+Ambos usam o mesmo banco Turso, mas funções separadas. Nunca use `APP_ROLE=all` nos dois serviços ao mesmo tempo, pois isso duplica o bot e os workers. Depois que os comandos globais forem registrados, pode definir `REGISTER_COMMANDS=false`; mudanças nos slash commands exigem novo registro.
+
+O deploy de um serviço não reinicia o outro. Uma atualização do código do bot só chega ao Discord quando o serviço `bot` no Railway (ou o serviço `all` escolhido) for implantado e reconectar. Os comandos slash são atualizados pelo Discord quando `REGISTER_COMMANDS=true`; comandos globais podem levar algum tempo para aparecer em todos os clientes.
 
 ## Rotas web
 
