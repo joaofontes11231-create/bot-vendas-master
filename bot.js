@@ -1193,9 +1193,9 @@ client.on('interactionCreate', async (interaction) => {
             new ButtonBuilder().setLabel('Pagar com Mercado Pago').setStyle(ButtonStyle.Link).setURL(checkout.paymentUrl)
           );
           return interaction.reply({
-            content: '🔄 **Renovação gerada: ' + order.order_code + '**\\n' +
-              '🖥️ **Hospedagem:** ' + hostingCode + '\\n' +
-              '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\\n' +
+            content: '🔄 **Renovação gerada: ' + order.order_code + '**\n' +
+              '🖥️ **Hospedagem:** ' + hostingCode + '\n' +
+              '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\n' +
               'O pagamento será confirmado automaticamente. Não envie comprovante nem compartilhe dados bancários.',
             components: [row],
             ephemeral: true
@@ -1244,11 +1244,11 @@ client.on('interactionCreate', async (interaction) => {
         const paymentCheckout = await mp.createCheckoutPreference(order, db);
         await sendUserAlert(
           license.owner_id,
-          '🔔 **Novo pedido — ' + license.store_name + '**\\n' +
-          '• **Pedido:** ' + order.order_code + '\\n' +
-          '• **Cliente:** <@' + interaction.user.id + '>\\n' +
-          '• **Plano:** ' + order.plan_name + '\\n' +
-          '• **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\\n' +
+          '🔔 **Novo pedido — ' + license.store_name + '**\n' +
+          '• **Pedido:** ' + order.order_code + '\n' +
+          '• **Cliente:** <@' + interaction.user.id + '>\n' +
+          '• **Plano:** ' + order.plan_name + '\n' +
+          '• **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\n' +
           'O checkout foi criado na conta Mercado Pago conectada.'
         );
         if (license.logs_channel_id) {
@@ -1264,10 +1264,10 @@ client.on('interactionCreate', async (interaction) => {
         const embed = new EmbedBuilder()
           .setTitle('🧾 Pedido criado — ' + order.order_code)
           .setDescription(
-            'Seu pedido foi registrado. Use o botão abaixo para pagar na conta Mercado Pago da loja.\\n\\n' +
-            '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\\n' +
-            '📦 **Plano:** ' + order.plan_name + ' (' + order.duration_days + ' dias)\\n' +
-            '🆔 **Pedido:** ' + order.order_code + '\\n\\n' +
+            'Seu pedido foi registrado. Use o botão abaixo para pagar na conta Mercado Pago da loja.\n\n' +
+            '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\n' +
+            '📦 **Plano:** ' + order.plan_name + ' (' + order.duration_days + ' dias)\n' +
+            '🆔 **Pedido:** ' + order.order_code + '\n\n' +
             'A hospedagem será liberada somente após a confirmação do pagamento pelo Mercado Pago.'
           )
           .setColor('#00b0f4');
