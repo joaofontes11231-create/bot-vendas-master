@@ -256,7 +256,7 @@ async function renderCustomerFixedPanel(guildId, customerId) {
         { name: '📅 Contratação', value: formatDateBR(latest.created_at), inline: true },
         { name: '⏳ Vencimento', value: `${formatDateBR(latest.expires_at)} (**${latest.daysLeft}d**)`, inline: true },
         { name: '📊 Total de Serviços', value: `${hostings.length} hospedagem(ns)`, inline: true },
-        { name: '⚙️ Recursos / Acesso', value: `${latest.specs || 'Conforme o plano'}\n${latest.access_info ? `🔑 **Dados:** \`${latest.access_info}\`` : ''}` }
+        { name: '⚙️ Recursos', value: `${latest.specs || 'Conforme o plano'}\n🔐 Dados de acesso disponíveis somente por mensagem privada.` }
       )
       .setColor(isOnline ? '#2ecc71' : '#e74c3c');
   }
