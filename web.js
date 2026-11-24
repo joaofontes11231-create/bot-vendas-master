@@ -2,7 +2,7 @@ const express = require('express');
 const session = require('express-session');
 const crypto = require('node:crypto');
 const db = require('./database');
-const { client: discordClient, notifyLicenseActivated, notifyLicenseBlocked, refreshAllFixedPanels } = require('./bot');
+const { client: discordClient, notifyLicenseActivated, notifyLicenseBlocked, notifyOrderApproved, refreshAllFixedPanels } = require('./bot');
 
 const app = express();
 
@@ -386,6 +386,8 @@ app.post('/api/orders/:orderCode/approve', requireAuth, async (req, res) => {
       return res.status(409).json({ ok: false, error: 'Este pedido já foi aprovado.' });
     }
     await db.logAudit(result.order.guild_id, 'WEB_MASTER', 'APROVAR_PEDIDO', `${result.order.order_code} -> ${result.hosting.code}`);
+    const license = await db.getLicense(result.order.guild_id);
+    await notifyOrderApproved(result, license?.store_name || 'Hospedagem');
     refreshAllFixedPanels().catch(() => {});
     res.json({ ok: true, result });
   } catch (err) {
