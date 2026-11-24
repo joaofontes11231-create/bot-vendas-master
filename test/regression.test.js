@@ -46,6 +46,14 @@ test('startup initializes the database before accepting traffic or logging into 
   assert.ok(index.indexOf('await startWeb()') < index.indexOf('await startBot()'));
 });
 
+test('APP_ROLE gates the web and bot services independently', () => {
+  const index = read('index.js');
+  assert.match(index, /\['all', 'web', 'bot'\]/);
+  assert.match(index, /role === 'all' \|\| role === 'web'/);
+  assert.match(index, /role === 'all' \|\| role === 'bot'/);
+  assert.match(index, /APP_ROLE inválido/);
+});
+
 test('environment template contains variable names but no populated secrets', () => {
   const env = read('.env.example');
   for (const line of env.split(/\r?\n/)) {
