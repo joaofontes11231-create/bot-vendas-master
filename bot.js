@@ -16,6 +16,7 @@ const {
   PermissionFlagsBits
 } = require('discord.js');
 const db = require('./database');
+const mp = require('./mercadopago');
 
 const OFFICIAL_DISCORD = 'https://discord.gg/ZQzv7U3Vnw';
 
@@ -256,7 +257,7 @@ async function renderCustomerFixedPanel(guildId, customerId) {
         { name: '📅 Contratação', value: formatDateBR(latest.created_at), inline: true },
         { name: '⏳ Vencimento', value: `${formatDateBR(latest.expires_at)} (**${latest.daysLeft}d**)`, inline: true },
         { name: '📊 Total de Serviços', value: `${hostings.length} hospedagem(ns)`, inline: true },
-        { name: '⚙️ Recursos / Acesso', value: `${latest.specs || 'Conforme o plano'}\n${latest.access_info ? `🔑 **Dados:** \`${latest.access_info}\`` : ''}` }
+        { name: '⚙️ Recursos', value: `${latest.specs || 'Conforme o plano'}\n🔐 Dados de acesso disponíveis somente por mensagem privada.` }
       )
       .setColor(isOnline ? '#2ecc71' : '#e74c3c');
   }
@@ -266,7 +267,7 @@ async function renderCustomerFixedPanel(guildId, customerId) {
   }
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`fp_cust_renew_${customerId}`).setLabel('Renovar').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('fp_cust_renew_' + customerId + '_' + (latest ? latest.code : 'none')).setLabel('Renovar').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`fp_cust_invoices_${customerId}`).setLabel('Faturas').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`fp_cust_support_${customerId}`).setLabel('Suporte').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`fp_cust_refresh_${customerId}`).setLabel('Atualizar').setStyle(ButtonStyle.Secondary)
@@ -536,6 +537,38 @@ async function registerCommands() {
 }
 
 let readyHandled = false;
+let processingPaymentOutbox = false;
+
+async function processPaymentOutbox() {
+  if (processingPaymentOutbox || !client.isReady()) return;
+  processingPaymentOutbox = true;
+  try {
+    const pending = await db.getPendingPaymentNotifications(20);
+    for (const item of pending) {
+      try {
+        const order = await db.getOrderByCode(item.order_code);
+        if (!order || order.status !== 'approved' || !order.hosting_code) continue;
+        const hosting = await db.getHostingByCode(order.hosting_code);
+        if (!hosting) continue;
+        const license = await db.getLicense(order.guild_id);
+        await notifyOrderApproved({
+          order,
+          hosting,
+          alreadyApproved: false,
+          renewed: Boolean(order.renewal_hosting_code)
+        }, license?.store_name || 'Loja');
+        await db.markPaymentNotificationProcessed(order.order_code);
+      } catch (err) {
+        console.error('Falha ao entregar notificação de pagamento:', item.order_code, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('Falha ao consultar fila de notificações de pagamento:', err.message);
+  } finally {
+    processingPaymentOutbox = false;
+  }
+}
+
 async function onBotReady() {
   if (readyHandled) return;
   readyHandled = true;
@@ -545,6 +578,8 @@ async function onBotReady() {
   }
   await runScheduledChecks();
   setInterval(runScheduledChecks, 5 * 60 * 1000);
+  await processPaymentOutbox();
+  setInterval(processPaymentOutbox, 15 * 1000);
 }
 
 client.once('clientReady', onBotReady);
@@ -740,6 +775,13 @@ client.on('interactionCreate', async (interaction) => {
       }
     }
 
+    if (interaction.isButton() && interaction.customId.startsWith('rate_')) {
+      const stars = Number(interaction.customId.slice('rate_'.length));
+      if (!Number.isInteger(stars) || stars < 1 || stars > 5) return interaction.reply({ content: '❌ Avaliação inválida.', ephemeral: true });
+      await db.addReview('global', interaction.user.id, stars);
+      return interaction.reply({ content: '✅ Obrigado pela sua avaliação de **' + stars + ' estrela(s)**!', ephemeral: true });
+    }
+
     if (!interaction.guildId) return;
     const license = await db.getLicense(interaction.guildId);
 
@@ -847,20 +889,23 @@ client.on('interactionCreate', async (interaction) => {
         if (!existing || existing.guild_id !== interaction.guildId) {
           return interaction.reply({ content: `❌ Pedido **${orderCode}** não encontrado nesta loja.`, ephemeral: true });
         }
+        if (existing.status === 'approved') {
+          return interaction.reply({ content: `✅ O pedido **${orderCode}** já foi aprovado e está vinculado à hospedagem **${existing.hosting_code || 'existente'}**.`, ephemeral: true });
+        }
+        if (existing.status !== 'pending') {
+          return interaction.reply({ content: `❌ O pedido **${orderCode}** não está pendente (status: ${existing.status}).`, ephemeral: true });
+        }
 
         const result = await db.approveOrderAndCreateHosting(orderCode, accessInfo);
+        if (!result) {
+          return interaction.reply({ content: '❌ Não foi possível aprovar o pedido. Atualize a lista e confira o status.', ephemeral: true });
+        }
+        if (result.alreadyApproved) {
+          return interaction.reply({ content: `✅ O pedido **${orderCode}** já estava aprovado.`, ephemeral: true });
+        }
         await db.logAudit(interaction.guildId, interaction.user.id, 'APROVAR_PEDIDO', `${orderCode} -> ${result.hosting.code}`);
 
-        await sendUserAlert(
-          result.order.customer_id,
-          `🎉 **Pagamento Confirmado & Hospedagem Ativa!**\n\n` +
-          `🏢 **Empresa:** ${license.store_name}\n` +
-          `🧾 **Pedido:** ${result.order.order_code}\n` +
-          `🆔 **ID da Hospedagem:** **${result.hosting.code}**\n` +
-          `📦 **Plano:** ${result.hosting.plan_name}\n` +
-          `⏳ **Vencimento:** ${formatDateBR(result.hosting.expires_at)} (${result.hosting.daysLeft}d)\n` +
-          `🔑 **Dados de Acesso:**\n\`\`\`${accessInfo}\`\`\``
-        );
+        await notifyOrderApproved(result, license.store_name);
 
         await refreshAllFixedPanels();
         return interaction.reply({
@@ -988,6 +1033,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isStringSelectMenu() && interaction.customId === 'prod_select') {
+      if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Apenas o dono da loja pode editar planos.', ephemeral: true });
       const prodId = parseInt(interaction.values[0], 10);
       const prod = await db.getProduct(prodId, interaction.guildId);
       if (!prod) return interaction.reply({ content: '❌ Plano não encontrado.', ephemeral: true });
@@ -1010,6 +1056,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('prod_edit_')) {
+      if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Apenas o dono da loja pode editar planos.', ephemeral: true });
       const prodId = parseInt(interaction.customId.replace('prod_edit_', ''), 10);
       const prod = await db.getProduct(prodId, interaction.guildId);
       if (!prod) return interaction.reply({ content: '❌ Plano não encontrado.', ephemeral: true });
@@ -1024,6 +1071,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isModalSubmit() && interaction.customId.startsWith('prod_modal_')) {
+      if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Apenas o dono da loja pode editar planos.', ephemeral: true });
       const prodId = parseInt(interaction.customId.replace('prod_modal_', ''), 10);
       const nome = interaction.fields.getTextInputValue('nome').trim();
       const preco = Number(interaction.fields.getTextInputValue('preco').replace(',', '.').trim());
@@ -1036,6 +1084,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (interaction.isButton() && interaction.customId.startsWith('prod_del_')) {
+      if (interaction.user.id !== license.owner_id && !isMaster) return interaction.reply({ content: '⛔ Apenas o dono da loja pode remover planos.', ephemeral: true });
       const prodId = parseInt(interaction.customId.replace('prod_del_', ''), 10);
       const ok = await db.deleteProduct(prodId, interaction.guildId);
       await refreshAllFixedPanels();
@@ -1099,18 +1148,12 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    if (interaction.isButton() && interaction.customId.startsWith('rate_')) {
-      const stars = Number(interaction.customId.replace('rate_', ''));
-      await db.addReview(interaction.guildId || 'global', interaction.user.id, stars);
-      await refreshAllFixedPanels();
-      return interaction.reply({ content: `✅ Obrigado pela sua avaliação de **${stars} estrela(s)**!`, ephemeral: true });
-    }
-
     // BOTÕES DO PAINEL FIXO DO CLIENTE
     if (interaction.isButton() && interaction.customId.startsWith('fp_cust_')) {
       const parts = interaction.customId.split('_');
       const action = parts[2];
       const ownerOfPanel = parts[3];
+      const hostingCode = parts.slice(4).join('_');
 
       if (interaction.user.id !== ownerOfPanel && interaction.user.id !== license.owner_id && !isMaster) {
         return interaction.reply({ content: '⛔ Este painel pertence a outro cliente.', ephemeral: true });
@@ -1130,21 +1173,25 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (action === 'renew') {
-        const products = await db.getProductsByGuild(interaction.guildId);
-        if (!products.length) return interaction.reply({ content: '❌ Nenhum plano cadastrado para renovação.', ephemeral: true });
-        const prod = products[0];
-        const order = await db.createOrder(interaction.guildId, ownerOfPanel, prod);
+        if (!hostingCode || hostingCode === 'none') {
+          return interaction.reply({ content: '❌ Não há hospedagem selecionada para renovar. Atualize seu painel.', ephemeral: true });
+        }
+        const order = await db.createRenewalOrder(interaction.guildId, ownerOfPanel, hostingCode);
+        if (!order) {
+          return interaction.reply({ content: '❌ Não foi possível gerar a renovação desta hospedagem. Atualize o painel e tente novamente.', ephemeral: true });
+        }
+        const pixKey = String((await db.getLicense(interaction.guildId))?.pix_key || '').trim();
+        await sendUserAlert((await db.getLicense(interaction.guildId))?.owner_id, '🔔 Renovação aguardando pagamento: ' + order.order_code + ' — R$ ' + Number(order.final_price).toFixed(2));
         await refreshAllFixedPanels();
         return interaction.reply({
-          content:
-            `🔄 **Pedido de Renovação Gerado: ${order.order_code}**\n` +
-            `💵 **Valor:** R$ ${Number(order.final_price).toFixed(2)}\n` +
-            `💠 **Chave PIX:** ${license.pix_key ? `\`${license.pix_key}\`` : 'Solicite ao dono no ticket'}\n` +
-            `*Após realizar o PIX, envie o comprovante para <@${license.owner_id}> liberar sua renovação!*`,
+          content: '🔄 **Renovação criada: ' + order.order_code + '**\\n' +
+            '🖥️ **Hospedagem:** ' + hostingCode + '\\n' +
+            '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\\n' +
+            '💠 **Chave PIX:** ' + (pixKey || 'A loja ainda não cadastrou uma chave PIX. Abra um ticket Financeiro.') + '\\n\\n' +
+            'Após pagar, envie o comprovante no ticket Financeiro. A renovação só será liberada depois da conferência manual do responsável.',
           ephemeral: true
         });
       }
-
       if (action === 'support') {
         return interaction.reply({ content: '🎫 Use `/suporte` ou clique no painel de tickets para abrir atendimento!', ephemeral: true });
       }
@@ -1177,38 +1224,34 @@ client.on('interactionCreate', async (interaction) => {
 
       const cupom = interaction.fields.getTextInputValue('cupom')?.trim() || null;
       const order = await db.createOrder(interaction.guildId, interaction.user.id, prod, cupom);
-
+      const pixKey = String(license.pix_key || '').trim();
       await sendUserAlert(
         license.owner_id,
-        `🔔 **Novo Pedido Gerado — ${license.store_name}**\n` +
-        `• **Pedido:** **${order.order_code}**\n` +
-        `• **Cliente:** <@${interaction.user.id}> (\`${interaction.user.id}\`)\n` +
-        `• **Plano:** ${order.plan_name} (${order.duration_days}d)\n` +
-        `• **Valor:** R$ ${Number(order.final_price).toFixed(2)}\n` +
-        `Use \`/painel_dono aprovar_pedido codigo_pedido:${order.order_code}\` ou aprove no **Site Oficial** após receber o PIX.`
+        '🔔 **Novo pedido aguardando conferência — ' + license.store_name + '**\\n' +
+        '• **Pedido:** ' + order.order_code + '\\n' +
+        '• **Cliente:** <@' + interaction.user.id + '>\\n' +
+        '• **Plano:** ' + order.plan_name + '\\n' +
+        '• **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\\n' +
+        'O cliente deve enviar o comprovante no ticket Financeiro. Não aprove até conferir o recebimento.'
       );
-
       if (license.logs_channel_id) {
         const logCh = interaction.guild.channels.cache.get(license.logs_channel_id);
         if (logCh && logCh.isTextBased()) {
-          await logCh.send(`🧾 Novo pedido **${order.order_code}** de <@${interaction.user.id}> — **${order.plan_name}** (R$ ${Number(order.final_price).toFixed(2)})`).catch(() => {});
+          await logCh.send('🧾 Pedido ' + order.order_code + ' criado para <@' + interaction.user.id + '> — R$ ' + Number(order.final_price).toFixed(2)).catch(() => {});
         }
       }
-
       await refreshAllFixedPanels();
-
       const embed = new EmbedBuilder()
-        .setTitle(`🧾 Pedido Criado — ${order.order_code}`)
+        .setTitle('🧾 Pedido criado — ' + order.order_code)
         .setDescription(
-          `Seu pedido foi registrado! Efetue o pagamento via **PIX** abaixo e envie o comprovante para a equipe liberar sua hospedagem.\n\n` +
-          `💠 **Chave PIX:** ${license.pix_key ? `\`${license.pix_key}\`` : `Solicite a chave PIX a <@${license.owner_id}>`}\n` +
-          `💵 **Valor a Pagar:** **R$ ${Number(order.final_price).toFixed(2)}**${order.coupon_code ? ` (Cupom \`${order.coupon_code}\` aplicado!)` : ''}\n` +
-          `📦 **Plano:** ${order.plan_name} (**${order.duration_days} dia(s)**)\n` +
-          `🆔 **Código do Pedido:** \`${order.order_code}\``
+          'Seu pedido foi registrado e aguarda conferência manual.\\n\\n' +
+          '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\\n' +
+          '📦 **Plano:** ' + order.plan_name + ' (' + order.duration_days + ' dias)\\n' +
+          '🆔 **Pedido:** ' + order.order_code + '\\n' +
+          '💠 **Chave PIX:** ' + (pixKey || 'A loja ainda não cadastrou uma chave PIX. Abra um ticket Financeiro.') + '\\n\\n' +
+          'Depois de pagar, envie o comprovante no ticket Financeiro. **Não envie senhas ou dados de acesso.** A hospedagem só será liberada quando o responsável conferir o pagamento e aprovar o pedido.'
         )
-        .setColor('#00b0f4')
-        .setFooter({ text: 'Assim que o PIX for conferido, sua hospedagem será ativada e enviada na sua DM.' });
-
+        .setColor('#00b0f4');
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }
   } catch (err) {
@@ -1219,11 +1262,33 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+async function notifyOrderApproved(result, storeName = 'Hospedagem') {
+  if (!result?.order || !result?.hosting || result.alreadyApproved) return false;
+
+  const hosting = result.hosting;
+  const message = (result.renewed
+    ? '🔄 **Renovação Confirmada!**'
+    : '🎉 **Pagamento Confirmado & Hospedagem Ativa!**') + '\n\n' +
+    '🏢 **Empresa:** ' + String(storeName) + '\n' +
+    '🧾 **Pedido:** ' + String(result.order.order_code) + '\n' +
+    '🆔 **Hospedagem:** ' + String(hosting.code) + '\n' +
+    '📦 **Plano:** ' + String(hosting.plan_name) + '\n' +
+    '⏳ **Vencimento:** ' + formatDateBR(hosting.expires_at) + ' (' + hosting.daysLeft + 'd)\n' +
+    (result.renewed ? '' : '🔑 **Dados de acesso:**\n\u0060\u0060\u0060\n' + String(hosting.access_info || 'Consulte o suporte') + '\n\u0060\u0060\u0060');
+
+  await sendUserAlert(result.order.customer_id, message);
+  return true;
+}
+
 async function startBot() {
   const token = process.env.DISCORD_TOKEN?.trim();
-  console.log('🔄 Tentando logar no Discord... Token existe?', Boolean(token), 'Tamanho:', token?.length || 0);
+  const masterId = process.env.MASTER_ID?.trim();
+  const clientId = process.env.CLIENT_ID?.trim();
   if (!token) throw new Error('DISCORD_TOKEN ausente.');
+  if (!masterId || !/^\d{17,20}$/.test(masterId)) throw new Error('MASTER_ID ausente ou inválido.');
+  if (process.env.REGISTER_COMMANDS === 'true' && !clientId) throw new Error('CLIENT_ID é obrigatório quando REGISTER_COMMANDS=true.');
+  console.log('🔄 Tentando conectar ao Discord...');
   await client.login(token);
 }
 
-module.exports = { startBot, client, notifyLicenseActivated, notifyLicenseBlocked, refreshAllFixedPanels };
+module.exports = { startBot, client, notifyLicenseActivated, notifyLicenseBlocked, notifyOrderApproved, refreshAllFixedPanels };
