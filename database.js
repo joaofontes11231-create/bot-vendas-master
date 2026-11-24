@@ -402,9 +402,16 @@ async function deleteOwnerAndStores(ownerId) {
 // PLANOS / PRODUTOS
 async function addProduct(guildId, name, description, price, durationDays = 30, specs = '') {
   const client = getClient();
+  const cleanName = String(name || '').trim();
+  const cleanDescription = String(description || '').trim();
+  const priceValue = Number(price);
+  const durationValue = Number(durationDays);
+  if (!cleanName || cleanName.length > 100) throw new Error('Nome do plano inválido.');
+  if (!Number.isFinite(priceValue) || priceValue <= 0 || priceValue > 1000000) throw new Error('Preço do plano inválido.');
+  if (!Number.isInteger(durationValue) || durationValue < 1 || durationValue > 3650) throw new Error('Duração do plano inválida.');
   const res = await client.execute({
     sql: 'INSERT INTO products (guild_id, name, description, price, duration_days, specs) VALUES (?, ?, ?, ?, ?, ?)',
-    args: [String(guildId).trim(), String(name).trim(), String(description).trim(), Number(price), Number(durationDays) || 30, String(specs || '').trim()]
+    args: [String(guildId).trim(), cleanName, cleanDescription, priceValue, durationValue, String(specs || '').trim()]
   });
   const id = Number(res.lastInsertRowid);
   return { id, lastInsertRowid: id };
@@ -463,11 +470,20 @@ async function deleteProduct(productId, guildId) {
 // CUPONS
 async function createCoupon(guildId, code, discountPercent, usesLeft = 100) {
   const client = getClient();
-  const cleanCode = String(code).trim().toUpperCase();
-  const pct = Math.min(95, Math.max(1, Number(discountPercent) || 10));
+  const cleanCode = String(code || '').trim().toUpperCase();
+  if (!/^[A-Z0-9_-]{3,32}$/.test(cleanCode)) throw new Error('Código de cupom inválido.');
+  const pct = Number(discountPercent);
+  if (!Number.isInteger(pct) || pct < 1 || pct > 95) throw new Error('Desconto deve ser um número inteiro entre 1 e 95.');
+  const existing = await client.execute({
+    sql: 'SELECT id FROM coupons WHERE guild_id = ? AND code = ? LIMIT 1',
+    args: [String(guildId).trim(), cleanCode]
+  });
+  if (existing.rows.length) throw new Error('Já existe um cupom com esse código nesta loja.');
+  const limit = Number(usesLeft);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100000) throw new Error('Quantidade de usos inválida.');
   await client.execute({
     sql: 'INSERT INTO coupons (guild_id, code, discount_percent, uses_left) VALUES (?, ?, ?, ?)',
-    args: [String(guildId).trim(), cleanCode, pct, Number(usesLeft) || 100]
+    args: [String(guildId).trim(), cleanCode, pct, limit]
   });
   return { code: cleanCode, discount_percent: pct };
 }
@@ -486,15 +502,21 @@ async function applyCoupon(guildId, code) {
 async function createOrder(guildId, customerId, product, couponCode = null) {
   const client = getClient();
   const originalPrice = Number(product.price);
+  if (!Number.isFinite(originalPrice) || originalPrice <= 0) throw new Error('Preço do pedido inválido.');
   let finalPrice = originalPrice;
   let appliedCoupon = null;
 
   if (couponCode) {
     const c = await applyCoupon(guildId, couponCode);
     if (c) {
-      appliedCoupon = c.code;
-      finalPrice = Math.max(1, Number((originalPrice * (1 - Number(c.discount_percent) / 100)).toFixed(2)));
-      await client.execute({ sql: 'UPDATE coupons SET uses_left = uses_left - 1 WHERE id = ?', args: [Number(c.id)] });
+      const reserved = await client.execute({
+        sql: 'UPDATE coupons SET uses_left = uses_left - 1 WHERE id = ? AND uses_left > 0',
+        args: [Number(c.id)]
+      });
+      if (Number(reserved.rowsAffected || 0) === 1) {
+        appliedCoupon = c.code;
+        finalPrice = Math.max(0.01, Number((originalPrice * (1 - Number(c.discount_percent) / 100)).toFixed(2)));
+      }
     }
   }
 
