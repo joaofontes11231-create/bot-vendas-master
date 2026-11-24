@@ -1227,6 +1227,24 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+async function notifyOrderApproved(result, storeName = 'Hospedagem') {
+  if (!result?.order || !result?.hosting || result.alreadyApproved) return false;
+
+  const hosting = result.hosting;
+  const message = (result.renewed
+    ? '🔄 **Renovação Confirmada!**'
+    : '🎉 **Pagamento Confirmado & Hospedagem Ativa!**') + '\n\n' +
+    '🏢 **Empresa:** ' + String(storeName) + '\n' +
+    '🧾 **Pedido:** ' + String(result.order.order_code) + '\n' +
+    '🆔 **Hospedagem:** ' + String(hosting.code) + '\n' +
+    '📦 **Plano:** ' + String(hosting.plan_name) + '\n' +
+    '⏳ **Vencimento:** ' + formatDateBR(hosting.expires_at) + ' (' + hosting.daysLeft + 'd)\n' +
+    (result.renewed ? '' : '🔑 **Dados de acesso:**\n\u0060\u0060\u0060\n' + String(hosting.access_info || 'Consulte o suporte') + '\n\u0060\u0060\u0060');
+
+  await sendUserAlert(result.order.customer_id, message);
+  return true;
+}
+
 async function startBot() {
   const token = process.env.DISCORD_TOKEN?.trim();
   console.log('🔄 Tentando logar no Discord... Token existe?', Boolean(token), 'Tamanho:', token?.length || 0);
@@ -1234,4 +1252,4 @@ async function startBot() {
   await client.login(token);
 }
 
-module.exports = { startBot, client, notifyLicenseActivated, notifyLicenseBlocked, refreshAllFixedPanels };
+module.exports = { startBot, client, notifyLicenseActivated, notifyLicenseBlocked, notifyOrderApproved, refreshAllFixedPanels };
