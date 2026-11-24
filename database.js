@@ -138,6 +138,25 @@ async function initDB() {
   `);
 
   await ensureColumn(client, 'orders', 'renewal_hosting_code', 'TEXT');
+  await ensureColumn(client, 'orders', 'payment_provider', 'TEXT');
+  await ensureColumn(client, 'orders', 'payment_url', 'TEXT');
+  await ensureColumn(client, 'orders', 'mp_preference_id', 'TEXT');
+  await ensureColumn(client, 'orders', 'mp_payment_id', 'TEXT');
+  await ensureColumn(client, 'orders', 'payment_status', "TEXT NOT NULL DEFAULT 'unpaid'");
+  await client.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_mp_payment_id ON orders(mp_payment_id) WHERE mp_payment_id IS NOT NULL");
+
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS mercado_pago_connections (
+      guild_id TEXT PRIMARY KEY,
+      mp_user_id TEXT NOT NULL UNIQUE,
+      nickname TEXT,
+      access_token_enc TEXT NOT NULL,
+      refresh_token_enc TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `);
   // Keep one active renewal order per customer and hosting; collapse legacy duplicates first.
   await client.execute(`
     UPDATE orders
@@ -619,6 +638,71 @@ async function getOrderByCode(orderCode) {
   return res.rows[0] || null;
 }
 
+async function saveMercadoPagoConnection({ guildId, mpUserId, nickname, accessTokenEnc, refreshTokenEnc, expiresAt }) {
+  const client = getClient();
+  await client.execute({
+    sql: `INSERT INTO mercado_pago_connections
+      (guild_id, mp_user_id, nickname, access_token_enc, refresh_token_enc, expires_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id) DO UPDATE SET
+        mp_user_id = excluded.mp_user_id,
+        nickname = excluded.nickname,
+        access_token_enc = excluded.access_token_enc,
+        refresh_token_enc = excluded.refresh_token_enc,
+        expires_at = excluded.expires_at,
+        updated_at = excluded.updated_at`,
+    args: [String(guildId), String(mpUserId), String(nickname || ''), String(accessTokenEnc), String(refreshTokenEnc), Number(expiresAt), Date.now(), Date.now()]
+  });
+}
+
+async function getMercadoPagoConnection(guildId) {
+  const client = getClient();
+  const res = await client.execute({
+    sql: 'SELECT * FROM mercado_pago_connections WHERE guild_id = ? LIMIT 1',
+    args: [String(guildId)]
+  });
+  return res.rows[0] || null;
+}
+
+async function getMercadoPagoConnectionByUserId(mpUserId) {
+  const client = getClient();
+  const res = await client.execute({
+    sql: 'SELECT * FROM mercado_pago_connections WHERE mp_user_id = ? LIMIT 1',
+    args: [String(mpUserId)]
+  });
+  return res.rows[0] || null;
+}
+
+async function getMercadoPagoConnectionStatus(guildId) {
+  const row = await getMercadoPagoConnection(guildId);
+  if (!row) return null;
+  return { guild_id: String(row.guild_id), mp_user_id: String(row.mp_user_id), nickname: String(row.nickname || ''), connected_at: Number(row.created_at || 0), updated_at: Number(row.updated_at || 0) };
+}
+
+async function deleteMercadoPagoConnection(guildId) {
+  const client = getClient();
+  const res = await client.execute({ sql: 'DELETE FROM mercado_pago_connections WHERE guild_id = ?', args: [String(guildId)] });
+  return Number(res.rowsAffected || 0) > 0;
+}
+
+async function updateOrderMercadoPagoPreference(orderCode, { preferenceId, paymentUrl }) {
+  const client = getClient();
+  const res = await client.execute({
+    sql: "UPDATE orders SET payment_provider = 'mercadopago', mp_preference_id = ?, payment_url = ?, payment_status = 'pending' WHERE order_code = ? AND status = 'pending'",
+    args: [String(preferenceId), String(paymentUrl), String(orderCode).toUpperCase()]
+  });
+  return Number(res.rowsAffected || 0) === 1;
+}
+
+async function markOrderMercadoPagoPayment(orderCode, paymentId, paymentStatus) {
+  const client = getClient();
+  const res = await client.execute({
+    sql: "UPDATE orders SET mp_payment_id = ?, payment_status = ? WHERE order_code = ? AND payment_provider = 'mercadopago' AND status = 'pending' AND (mp_payment_id IS NULL OR mp_payment_id = ?)",
+    args: [String(paymentId), String(paymentStatus), String(orderCode).toUpperCase(), String(paymentId)]
+  });
+  return Number(res.rowsAffected || 0) === 1;
+}
+
 async function getOrdersByGuild(guildId) {
   const client = getClient();
   const res = await client.execute({
@@ -956,6 +1040,13 @@ module.exports = {
   createOrder,
   createRenewalOrder,
   getOrderByCode,
+  saveMercadoPagoConnection,
+  getMercadoPagoConnection,
+  getMercadoPagoConnectionByUserId,
+  getMercadoPagoConnectionStatus,
+  deleteMercadoPagoConnection,
+  updateOrderMercadoPagoPreference,
+  markOrderMercadoPagoPayment,
   getOrdersByGuild,
   getOrdersByCustomer,
   approveOrderAndCreateHosting,
