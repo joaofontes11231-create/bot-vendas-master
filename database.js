@@ -1,4 +1,5 @@
 const { createClient } = require('@libsql/client');
+const { randomBytes } = require('node:crypto');
 
 let db = null;
 
@@ -131,9 +132,12 @@ async function initDB() {
       status TEXT NOT NULL DEFAULT 'pending',
       hosting_code TEXT,
       created_at INTEGER NOT NULL,
-      approved_at INTEGER
+      approved_at INTEGER,
+      renewal_hosting_code TEXT
     )
   `);
+
+  await ensureColumn(client, 'orders', 'renewal_hosting_code', 'TEXT');
 
   await client.execute(`
     CREATE TABLE IF NOT EXISTS hostings (
@@ -463,7 +467,7 @@ async function createOrder(guildId, customerId, product, couponCode = null) {
   }
 
   const now = Date.now();
-  const tempCode = `PED-${now.toString().slice(-6)}`;
+  const tempCode = `PED-TMP-${randomBytes(8).toString('hex')}`;
 
   const res = await client.execute({
     sql: `
@@ -477,6 +481,40 @@ async function createOrder(guildId, customerId, product, couponCode = null) {
   const formattedCode = `PED-${String(orderId).padStart(5, '0')}`;
   await client.execute({ sql: 'UPDATE orders SET order_code = ? WHERE id = ?', args: [formattedCode, orderId] });
   return getOrderByCode(formattedCode);
+}
+
+async function createRenewalOrder(guildId, customerId, hostingCode) {
+  const gid = String(guildId).trim();
+  const customer = String(customerId).trim();
+  const hosting = await getHostingByCode(hostingCode);
+
+  if (!hosting || hosting.guild_id !== gid || hosting.customer_id !== customer) {
+    return null;
+  }
+
+  const client = getClient();
+  const periodRes = await client.execute({
+    sql: "SELECT duration_days FROM orders WHERE hosting_code = ? AND guild_id = ? AND status = 'approved' ORDER BY approved_at DESC, id DESC LIMIT 1",
+    args: [hosting.code, gid]
+  });
+  const durationDays = Math.max(1, Number(periodRes.rows[0]?.duration_days) || 30);
+
+  const renewalProduct = {
+    id: 0,
+    name: hosting.plan_name,
+    description: hosting.specs,
+    price: hosting.price,
+    duration_days: durationDays,
+    specs: hosting.specs
+  };
+
+  const order = await createOrder(gid, customer, renewalProduct);
+  await client.execute({
+    sql: 'UPDATE orders SET renewal_hosting_code = ? WHERE id = ? AND status = \'pending\'',
+    args: [hosting.code, Number(order.id)]
+  });
+
+  return getOrderByCode(order.order_code);
 }
 
 async function getOrderByCode(orderCode) {
@@ -521,11 +559,37 @@ async function approveOrderAndCreateHosting(orderCode, accessInfo = 'Liberado pe
     const existingHosting = await getHostingByCode(order.hosting_code);
     return { order, hosting: existingHosting, alreadyApproved: true };
   }
+  if (order.status !== 'pending') return null;
+
+  if (order.renewal_hosting_code) {
+    const currentHosting = await getHostingByCode(order.renewal_hosting_code);
+    if (
+      !currentHosting ||
+      currentHosting.guild_id !== String(order.guild_id) ||
+      currentHosting.customer_id !== String(order.customer_id)
+    ) {
+      return null;
+    }
+
+    const renewedHosting = await renewHosting(
+      order.renewal_hosting_code,
+      Number(order.duration_days || 30)
+    );
+    if (!renewedHosting) return null;
+
+    await client.execute({
+      sql: "UPDATE orders SET status = 'approved', hosting_code = ?, approved_at = ? WHERE id = ? AND status = 'pending'",
+      args: [renewedHosting.code, Date.now(), Number(order.id)]
+    });
+
+    const updatedOrder = await getOrderByCode(orderCode);
+    return { order: updatedOrder, hosting: renewedHosting, alreadyApproved: false, renewed: true };
+  }
 
   const product = await getProduct(order.product_id, order.guild_id);
   const now = Date.now();
   const expiresAt = now + Number(order.duration_days || 30) * 24 * 60 * 60 * 1000;
-  const tempHos = `HOS-${now.toString().slice(-6)}`;
+  const tempHos = `HOS-TMP-${randomBytes(8).toString('hex')}`;
 
   const hosRes = await client.execute({
     sql: `
@@ -766,6 +830,7 @@ module.exports = {
   createCoupon,
   applyCoupon,
   createOrder,
+  createRenewalOrder,
   getOrderByCode,
   getOrdersByGuild,
   getOrdersByCustomer,
