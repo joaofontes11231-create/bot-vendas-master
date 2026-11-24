@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "check": "node --check index.js && node --check bot.js && node --check database.js && node --check web.js",
+    "check": "node --check index.js && node --check bot.js && node --check database.js && node --check web.js && node --check mercadopago.js",
     "test": "node --test && npm run check"
   },
   "keywords": [],
