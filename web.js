@@ -2,6 +2,7 @@ const express = require('express');
 const session = require('express-session');
 const crypto = require('node:crypto');
 const db = require('./database');
+const mp = require('./mercadopago');
 const { client: discordClient, notifyLicenseActivated, notifyLicenseBlocked, notifyOrderApproved, refreshAllFixedPanels } = require('./bot');
 
 const app = express();
@@ -305,6 +306,196 @@ app.post('/login', (req, res) => {
 
 app.post('/logout', (req, res) => {
   req.session.destroy(() => res.redirect('/login'));
+});
+
+function isDiscordId(value) {
+  return /^\\d{17,20}$/.test(String(value || ''));
+}
+
+function safeStateEqual(a, b) {
+  const left = Buffer.from(String(a || ''), 'utf8');
+  const right = Buffer.from(String(b || ''), 'utf8');
+  return left.length > 0 && left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+async function getOwnedStore(req, res) {
+  const guildId = String(req.params.guildId || '');
+  if (!isDiscordId(guildId)) {
+    res.status(400).send('Identificador de loja inválido.');
+    return null;
+  }
+  const license = await db.getLicense(guildId);
+  if (!license) {
+    res.status(404).send('Loja não encontrada.');
+    return null;
+  }
+  if (!req.session?.sellerDiscordId || String(req.session.sellerDiscordId) !== String(license.owner_id)) {
+    res.status(403).send('Esta conta Discord não é proprietária desta loja.');
+    return null;
+  }
+  return license;
+}
+
+app.get('/auth/discord', (req, res) => {
+  const guildId = String(req.query.guild_id || '');
+  if (!isDiscordId(guildId)) return res.status(400).send('Loja inválida.');
+  const clientId = String(process.env.CLIENT_ID || '').trim();
+  const redirectUri = String(process.env.DISCORD_REDIRECT_URI || '').trim();
+  if (!clientId || !process.env.DISCORD_CLIENT_SECRET || !redirectUri) {
+    return res.status(503).send('Login Discord ainda não configurado pelo administrador.');
+  }
+  const state = crypto.randomBytes(32).toString('hex');
+  req.session.discordOAuth = { state, guildId, createdAt: Date.now() };
+  const url = new URL('https://discord.com/oauth2/authorize');
+  url.search = new URLSearchParams({
+    client_id: clientId,
+    response_type: 'code',
+    redirect_uri: redirectUri,
+    scope: 'identify',
+    state
+  }).toString();
+  return req.session.save((err) => {
+    if (err) return res.status(500).send('Não foi possível iniciar o login Discord.');
+    return res.redirect(url.toString());
+  });
+});
+
+app.get('/auth/discord/callback', async (req, res) => {
+  try {
+    const pending = req.session?.discordOAuth;
+    if (!pending || Date.now() - Number(pending.createdAt) > 10 * 60 * 1000 ||
+        !safeStateEqual(pending.state, req.query.state) || !req.query.code) {
+      return res.status(400).send('Login Discord expirado ou inválido. Inicie novamente.');
+    }
+    const redirectUri = String(process.env.DISCORD_REDIRECT_URI || '').trim();
+    const tokenResponse = await fetch('https://discord.com/api/oauth2/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
+      body: new URLSearchParams({
+        client_id: String(process.env.CLIENT_ID || ''),
+        client_secret: String(process.env.DISCORD_CLIENT_SECRET || ''),
+        grant_type: 'authorization_code',
+        code: String(req.query.code),
+        redirect_uri: redirectUri
+      }),
+      signal: AbortSignal.timeout(15000)
+    });
+    const tokenData = await tokenResponse.json().catch(() => ({}));
+    if (!tokenResponse.ok || !tokenData.access_token) {
+      return res.status(401).send('Não foi possível autenticar no Discord.');
+    }
+    const userResponse = await fetch('https://discord.com/api/users/@me', {
+      headers: { Authorization: 'Bearer ' + tokenData.access_token, Accept: 'application/json' },
+      signal: AbortSignal.timeout(10000)
+    });
+    const user = await userResponse.json().catch(() => ({}));
+    if (!userResponse.ok || !isDiscordId(user.id)) {
+      return res.status(401).send('Não foi possível validar a conta Discord.');
+    }
+    const guildId = pending.guildId;
+    req.session.discordOAuth = null;
+    req.session.sellerDiscordId = String(user.id);
+    req.session.sellerDiscordName = String(user.username || '').slice(0, 80);
+    return req.session.save((err) => {
+      if (err) return res.status(500).send('Não foi possível salvar a sessão.');
+      return res.redirect('/seller/' + encodeURIComponent(guildId));
+    });
+  } catch (err) {
+    console.error('Falha no login Discord do lojista:', err.message);
+    return res.status(502).send('Falha ao autenticar no Discord. Tente novamente.');
+  }
+});
+
+app.get('/seller/:guildId', async (req, res) => {
+  try {
+    if (!req.session?.sellerDiscordId) {
+      return res.redirect('/auth/discord?guild_id=' + encodeURIComponent(req.params.guildId));
+    }
+    const license = await getOwnedStore(req, res);
+    if (!license) return;
+    const connection = await db.getMercadoPagoConnectionStatus(license.guild_id);
+    const connected = Boolean(connection);
+    const nickname = connection?.nickname ? String(connection.nickname).replace(/[&<>"']/g, '') : '';
+    return res.send(`<!doctype html>
+<html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pagamentos da loja</title><style>
+body{margin:0;background:#0b1120;color:#f8fafc;font:16px Arial,sans-serif;padding:24px}
+main{max-width:680px;margin:30px auto;background:#1e293b;border:1px solid #334155;border-radius:16px;padding:24px}
+p{color:#cbd5e1;line-height:1.6}.status{padding:12px;border-radius:10px;background:#0f172a;margin:16px 0}
+a,button{display:inline-block;padding:12px 16px;border-radius:9px;text-decoration:none;border:0;background:#16a34a;color:white;font-weight:bold}
+small{color:#94a3b8}
+</style></head><body><main>
+<h1>Pagamentos — ${String(license.store_name).replace(/[&<>"']/g, '')}</h1>
+<p>Conecte a conta Mercado Pago pertencente ao responsável por esta loja. A autorização é feita no próprio Mercado Pago; sua senha não é compartilhada com este sistema.</p>
+<div class="status">${connected ? '🟢 Conta conectada' + (nickname ? ' — ' + nickname : '') : '🟠 Nenhuma conta Mercado Pago conectada'}</div>
+<a href="/seller/${encodeURIComponent(license.guild_id)}/mercadopago/connect">${connected ? 'Reconectar Mercado Pago' : 'Conectar Mercado Pago'}</a>
+<p><small>O token de acesso fica criptografado no banco. Nunca envie tokens, senhas ou códigos de autorização por mensagens.</small></p>
+</main></body></html>`);
+  } catch (err) {
+    console.error('Erro ao abrir painel do lojista:', err.message);
+    return res.status(500).send('Não foi possível carregar o painel da loja.');
+  }
+});
+
+app.get('/seller/:guildId/mercadopago/connect', async (req, res) => {
+  try {
+    if (!req.session?.sellerDiscordId) {
+      return res.redirect('/auth/discord?guild_id=' + encodeURIComponent(req.params.guildId));
+    }
+    const license = await getOwnedStore(req, res);
+    if (!license) return;
+    const { verifier, challenge } = mp.createPkcePair();
+    const state = crypto.randomBytes(32).toString('hex');
+    req.session.mpOAuth = {
+      state,
+      verifier,
+      guildId: String(license.guild_id),
+      sellerDiscordId: String(req.session.sellerDiscordId),
+      createdAt: Date.now()
+    };
+    const authorizationUrl = mp.buildAuthorizationUrl({ state, challenge });
+    return req.session.save((err) => {
+      if (err) return res.status(500).send('Não foi possível iniciar a conexão Mercado Pago.');
+      return res.redirect(authorizationUrl);
+    });
+  } catch (err) {
+    console.error('Erro ao iniciar OAuth Mercado Pago:', err.message);
+    return res.status(503).send('Integração Mercado Pago ainda não configurada pelo administrador.');
+  }
+});
+
+app.get('/oauth/mercadopago/callback', async (req, res) => {
+  try {
+    const pending = req.session?.mpOAuth;
+    if (!pending || Date.now() - Number(pending.createdAt) > 10 * 60 * 1000 ||
+        !safeStateEqual(pending.state, req.query.state) || !req.query.code) {
+      return res.status(400).send('Autorização Mercado Pago expirada ou inválida. Inicie novamente.');
+    }
+    if (!req.session?.sellerDiscordId ||
+        String(req.session.sellerDiscordId) !== String(pending.sellerDiscordId)) {
+      return res.status(403).send('Sessão do lojista não corresponde à autorização iniciada.');
+    }
+    const license = await db.getLicense(pending.guildId);
+    if (!license || String(license.owner_id) !== String(pending.sellerDiscordId)) {
+      return res.status(403).send('A conta Discord não é mais proprietária desta loja.');
+    }
+    const tokens = await mp.exchangeAuthorizationCode(String(req.query.code), pending.verifier);
+    const profile = await mp.fetchSellerProfile(tokens.accessToken);
+    await db.saveMercadoPagoConnection({
+      guildId: license.guild_id,
+      mpUserId: tokens.mpUserId,
+      nickname: profile?.nickname || '',
+      accessTokenEnc: mp.encryptToken(tokens.accessToken),
+      refreshTokenEnc: mp.encryptToken(tokens.refreshToken),
+      expiresAt: tokens.expiresAt
+    });
+    req.session.mpOAuth = null;
+    await new Promise((resolve, reject) => req.session.save((err) => err ? reject(err) : resolve()));
+    return res.redirect('/seller/' + encodeURIComponent(license.guild_id) + '?connected=1');
+  } catch (err) {
+    console.error('Falha na conexão Mercado Pago:', err.message);
+    return res.status(502).send('Não foi possível concluir a conexão Mercado Pago. Verifique a configuração OAuth e tente novamente.');
+  }
 });
 
 app.get('/api/state', requireAuth, async (req, res) => {
