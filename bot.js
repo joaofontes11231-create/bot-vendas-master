@@ -266,7 +266,7 @@ async function renderCustomerFixedPanel(guildId, customerId) {
   }
 
   const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`fp_cust_renew_${customerId}`).setLabel('Renovar').setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId('fp_cust_renew_' + customerId + '_' + (latest ? latest.code : 'none')).setLabel('Renovar').setStyle(ButtonStyle.Success),
     new ButtonBuilder().setCustomId(`fp_cust_invoices_${customerId}`).setLabel('Faturas').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(`fp_cust_support_${customerId}`).setLabel('Suporte').setStyle(ButtonStyle.Secondary),
     new ButtonBuilder().setCustomId(`fp_cust_refresh_${customerId}`).setLabel('Atualizar').setStyle(ButtonStyle.Secondary)
@@ -1115,6 +1115,7 @@ client.on('interactionCreate', async (interaction) => {
       const parts = interaction.customId.split('_');
       const action = parts[2];
       const ownerOfPanel = parts[3];
+      const hostingCode = parts.slice(4).join('_');
 
       if (interaction.user.id !== ownerOfPanel && interaction.user.id !== license.owner_id && !isMaster) {
         return interaction.reply({ content: '⛔ Este painel pertence a outro cliente.', ephemeral: true });
@@ -1134,21 +1135,24 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (action === 'renew') {
-        const products = await db.getProductsByGuild(interaction.guildId);
-        if (!products.length) return interaction.reply({ content: '❌ Nenhum plano cadastrado para renovação.', ephemeral: true });
-        const prod = products[0];
-        const order = await db.createOrder(interaction.guildId, ownerOfPanel, prod);
+        if (!hostingCode || hostingCode === 'none') {
+          return interaction.reply({ content: '❌ Não há hospedagem selecionada para renovar. Atualize seu painel.', ephemeral: true });
+        }
+        const order = await db.createRenewalOrder(interaction.guildId, ownerOfPanel, hostingCode);
+        if (!order) {
+          return interaction.reply({ content: '❌ Não foi possível gerar a renovação desta hospedagem. Atualize o painel e tente novamente.', ephemeral: true });
+        }
         await refreshAllFixedPanels();
+        const pix = license.pix_key ? '`' + license.pix_key + '`' : 'Solicite ao dono no ticket';
         return interaction.reply({
-          content:
-            `🔄 **Pedido de Renovação Gerado: ${order.order_code}**\n` +
-            `💵 **Valor:** R$ ${Number(order.final_price).toFixed(2)}\n` +
-            `💠 **Chave PIX:** ${license.pix_key ? `\`${license.pix_key}\`` : 'Solicite ao dono no ticket'}\n` +
-            `*Após realizar o PIX, envie o comprovante para <@${license.owner_id}> liberar sua renovação!*`,
+          content: '🔄 **Pedido de Renovação Gerado: ' + order.order_code + '**\n' +
+            '🖥️ **Hospedagem:** ' + hostingCode + '\n' +
+            '💵 **Valor:** R$ ' + Number(order.final_price).toFixed(2) + '\n' +
+            '💠 **Chave PIX:** ' + pix + '\n' +
+            '*Após realizar o PIX, envie o comprovante para <@' + license.owner_id + '> liberar sua renovação!*',
           ephemeral: true
         });
       }
-
       if (action === 'support') {
         return interaction.reply({ content: '🎫 Use `/suporte` ou clique no painel de tickets para abrir atendimento!', ephemeral: true });
       }
