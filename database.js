@@ -429,6 +429,8 @@ async function deleteLicense(guildId) {
   const current = await getLicense(gid);
   if (!current) return false;
 
+  await client.execute({ sql: 'DELETE FROM mercado_pago_connections WHERE guild_id = ?', args: [gid] });
+  await client.execute({ sql: 'DELETE FROM payment_notification_outbox WHERE order_code IN (SELECT order_code FROM orders WHERE guild_id = ?)', args: [gid] });
   await client.execute({ sql: 'DELETE FROM products WHERE guild_id = ?', args: [gid] });
   await client.execute({ sql: 'DELETE FROM orders WHERE guild_id = ?', args: [gid] });
   await client.execute({ sql: 'DELETE FROM hostings WHERE guild_id = ?', args: [gid] });
