@@ -730,6 +730,15 @@ async function markOrderMercadoPagoPayment(orderCode, paymentId, paymentStatus) 
   return Number(res.rowsAffected || 0) === 1;
 }
 
+async function updateApprovedMercadoPagoPaymentStatus(orderCode, paymentId, paymentStatus) {
+  const client = getClient();
+  const res = await client.execute({
+    sql: "UPDATE orders SET payment_status = ? WHERE order_code = ? AND payment_provider = 'mercadopago' AND status = 'approved' AND mp_payment_id = ?",
+    args: [String(paymentStatus), String(orderCode).toUpperCase(), String(paymentId)]
+  });
+  return Number(res.rowsAffected || 0) === 1;
+}
+
 async function getOrdersByGuild(guildId) {
   const client = getClient();
   const res = await client.execute({
@@ -1105,6 +1114,7 @@ module.exports = {
   claimMercadoPagoCheckout,
   failMercadoPagoCheckout,
   markOrderMercadoPagoPayment,
+  updateApprovedMercadoPagoPaymentStatus,
   getOrdersByGuild,
   getOrdersByCustomer,
   approveOrderAndCreateHosting,
