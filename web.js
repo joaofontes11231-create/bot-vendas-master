@@ -314,10 +314,18 @@ app.get('/api/clients/:ownerId', requireAuth, async (req, res) => {
 app.post('/api/licenses', requireAuth, async (req, res) => {
   try {
     const { guild_id, owner_id, store_name, server_name, days } = req.body;
-    if (!guild_id || !owner_id || !store_name || !days) {
-      return res.status(400).json({ ok: false, error: 'Preencha ID do servidor, ID do dono, nome da loja e dias.' });
+    const dayCount = Number(days);
+    const snowflake = /^\d{17,20}$/;
+    if (!snowflake.test(String(guild_id || '')) || !snowflake.test(String(owner_id || ''))) {
+      return res.status(400).json({ ok: false, error: 'Informe IDs válidos do Discord para servidor e proprietário.' });
     }
-    const lic = await db.upsertLicense(guild_id, owner_id, store_name, Number(days), server_name || null);
+    if (typeof store_name !== 'string' || !store_name.trim() || store_name.trim().length > 80) {
+      return res.status(400).json({ ok: false, error: 'O nome da loja é obrigatório e deve ter até 80 caracteres.' });
+    }
+    if (!Number.isInteger(dayCount) || dayCount < 1 || dayCount > 3650) {
+      return res.status(400).json({ ok: false, error: 'A duração deve ser um número inteiro entre 1 e 3650 dias.' });
+    }
+    const lic = await db.upsertLicense(guild_id, owner_id, store_name.trim(), dayCount, server_name || null);
     await db.logAudit(guild_id, 'WEB_MASTER', 'ATIVAR_LICENCA', `${store_name} (${days}d)`);
     notifyLicenseActivated(lic).catch(() => {});
     refreshAllFixedPanels().catch(() => {});
@@ -361,13 +369,27 @@ app.patch('/api/licenses/:guildId', requireAuth, async (req, res) => {
 
 app.post('/api/orders/:orderCode/approve', requireAuth, async (req, res) => {
   try {
+    const orderCode = String(req.params.orderCode || '').trim().toUpperCase();
+    if (!/^PED-[A-Z0-9-]{1,32}$/.test(orderCode)) {
+      return res.status(400).json({ ok: false, error: 'Código de pedido inválido.' });
+    }
+    const current = await db.getOrderByCode(orderCode);
+    if (!current) return res.status(404).json({ ok: false, error: 'Pedido não encontrado.' });
+    if (current.status !== 'pending') {
+      return res.status(409).json({ ok: false, error: 'O pedido não está pendente ou já foi processado.' });
+    }
+
     const { access_info } = req.body;
-    const result = await db.approveOrderAndCreateHosting(req.params.orderCode, access_info || 'Liberado via Painel Web');
-    if (!result) return res.status(404).json({ ok: false, error: 'Pedido não encontrado.' });
+    const result = await db.approveOrderAndCreateHosting(orderCode, access_info || 'Liberado via Painel Web');
+    if (!result) return res.status(409).json({ ok: false, error: 'Não foi possível aprovar. Atualize o pedido e confira o status.' });
+    if (result.alreadyApproved) {
+      return res.status(409).json({ ok: false, error: 'Este pedido já foi aprovado.' });
+    }
     await db.logAudit(result.order.guild_id, 'WEB_MASTER', 'APROVAR_PEDIDO', `${result.order.order_code} -> ${result.hosting.code}`);
     refreshAllFixedPanels().catch(() => {});
     res.json({ ok: true, result });
   } catch (err) {
+    console.error('Erro ao aprovar pedido pelo painel web:', err);
     res.status(500).json({ ok: false, error: 'Erro ao aprovar pedido.' });
   }
 });
